@@ -13,6 +13,23 @@ Task steps. For the exact rules behind each action, setting and file, see [spec.
   The app starts in the tray. If the icon isn't visible, look under the `^` overflow arrow.
 - **Installed copy:** run `%LOCALAPPDATA%\Programs\pane-pogo\pane-pogo.exe`. It exists after you turn on Start with Windows.
 
+## Default shortcuts
+
+On first run, pane-pogo creates these shortcuts. They are only defaults: change or remove any of them in Settings.
+
+| Shortcut | What happens |
+|---|---|
+| `Alt+Shift+1` | Current window fills the primary monitor. |
+| `Alt+Shift+2` | Current window fills the secondary monitor. |
+| `Alt+Shift+E` | Current window takes the left half of the primary monitor. |
+| `Alt+Shift+R` | Current window takes the right half of the primary monitor. |
+| `Alt+Shift+W` | Side by side on the primary monitor. Current window left, previous window right. You keep typing in the current window. |
+| `Alt+Shift+D` | Each window fills its own monitor. Current window on the primary monitor. You keep typing in the current window. |
+| `Alt+Shift+S` | Swap places: the two windows trade position and size. |
+| `Alt+Shift+Z` | Move the current window to the next monitor, keeping its size. |
+
+If another program already uses one of them, pane-pogo shows a notification on first run and Settings marks that row. Pick a different shortcut there.
+
 ## Add or change a shortcut
 
 1. Right-click the tray icon and choose **Settings...**

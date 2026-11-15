@@ -1,6 +1,18 @@
 use crate::layout::Layout;
 use serde::{Deserialize, Serialize};
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs, io,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+/// Set when `load` writes the default file, so the tray can warn once about taken shortcuts.
+static CREATED_DEFAULTS: AtomicBool = AtomicBool::new(false);
+
+/// True once after `load` created the default file. Reading it clears it.
+pub fn took_created_defaults() -> bool {
+    CREATED_DEFAULTS.swap(false, Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -145,14 +157,15 @@ pub fn load_status() -> Status {
         .unwrap_or_default()
 }
 
-/// Loads the config. If the file is missing, writes an empty one: the user sets up their own shortcuts.
+/// Loads the config. If the file is missing, writes the default shortcuts (see `default_config`).
 pub fn load() -> Result<Config, String> {
     let path = path()?;
     match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let cfg = Config::default();
+            let cfg = default_config();
             save(&cfg)?;
+            CREATED_DEFAULTS.store(true, Ordering::Relaxed);
             Ok(cfg)
         }
         Err(e) => Err(format!("{}: {e}", path.display())),
@@ -166,4 +179,68 @@ pub fn save(cfg: &Config) -> Result<(), String> {
     }
     let text = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
     fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The shortcuts a new install starts with. The user can change or remove every one in Settings.
+fn default_config() -> Config {
+    let bind = |shortcut: &str, action: Action, pair: Option<PairSettings>| Binding {
+        shortcut: shortcut.into(),
+        action,
+        pair,
+    };
+    let pair = |order: Order| {
+        Some(PairSettings {
+            order,
+            monitor: MonitorRole::Primary,
+            focus: Focus::Current,
+        })
+    };
+    Config {
+        bindings: vec![
+            bind("Alt+Shift+1", Action::FullPrimary, None),
+            bind("Alt+Shift+2", Action::FullSecondary, None),
+            bind("Alt+Shift+E", Action::TileLeft, None),
+            bind("Alt+Shift+R", Action::TileRight, None),
+            bind("Alt+Shift+W", Action::TileWindows, pair(Order::CurrentLeft)),
+            bind(
+                "Alt+Shift+D",
+                Action::TileDualMonitors,
+                pair(Order::CurrentRight),
+            ),
+            bind("Alt+Shift+S", Action::SwapWindows, None),
+            bind("Alt+Shift+Z", Action::MoveToNextMonitor, None),
+        ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_shortcuts_are_valid_and_unique() {
+        let cfg = default_config();
+        assert_eq!(cfg.bindings.len(), 8);
+        let mut seen = std::collections::HashSet::new();
+        for b in &cfg.bindings {
+            assert!(
+                crate::hotkeys::parse(&b.shortcut).is_ok(),
+                "{} does not parse",
+                b.shortcut
+            );
+            assert!(
+                seen.insert(b.shortcut.to_lowercase()),
+                "duplicate {}",
+                b.shortcut
+            );
+        }
+    }
+
+    #[test]
+    fn default_config_round_trips_through_json() {
+        let cfg = default_config();
+        let text = serde_json::to_string(&cfg).unwrap();
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.bindings, cfg.bindings);
+    }
 }

@@ -58,7 +58,7 @@ Only the four "Side by side" and "Full screen on separate monitors" actions use 
 - **Key repeat:** holding the keys fires the action once.
 - **Uniqueness:** each shortcut may appear once in the list.
 - **Conflicts:** a shortcut another program holds cannot register. pane-pogo skips it, logs it, lists it in `status.json`, and Settings marks the row.
-- **Defaults:** when `bindings.json` does not exist, pane-pogo creates it empty. No shortcuts are assigned until the user adds them in Settings.
+- **Defaults:** when `bindings.json` does not exist, pane-pogo creates it with eight default shortcuts: `Alt+Shift+1` → `full_primary`, `Alt+Shift+2` → `full_secondary`, `Alt+Shift+E` → `tile_left`, `Alt+Shift+R` → `tile_right`, `Alt+Shift+W` → `tile_windows` (current window left, primary monitor, focus stays), `Alt+Shift+D` → `tile_dual_monitors` (current window on the primary monitor, focus stays), `Alt+Shift+S` → `swap_windows` and `Alt+Shift+Z` → `move_to_next_monitor`. The user can change or remove every one in Settings. If another program already holds a default, pane-pogo skips it, marks the row in Settings and shows one tray notification on that first run.
 
 ## Files
 

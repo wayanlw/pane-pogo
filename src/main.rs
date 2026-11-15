@@ -45,6 +45,9 @@ fn main() {
     let mut cfg = load_or_report(tray_hwnd).unwrap_or_default();
     let hook = focus::install();
     let mut registered = register_all(&cfg);
+    if config::took_created_defaults() {
+        warn_taken_defaults(tray_hwnd);
+    }
 
     let mut msg = MSG::default();
     loop {
@@ -136,6 +139,30 @@ fn load_or_report(tray_hwnd: windows::Win32::Foundation::HWND) -> Option<config:
     }
 }
 
+/// On a first run, tells the user which default shortcuts another program already holds.
+/// Settings also marks each of those rows, so this only points the user there.
+fn warn_taken_defaults(tray_hwnd: windows::Win32::Foundation::HWND) {
+    let taken = config::load_status().in_use;
+    if let Some(text) = taken_message(&taken) {
+        tray::notify(
+            tray_hwnd,
+            "pane-pogo: some shortcuts are not active",
+            &text,
+            false,
+        );
+    }
+}
+
+fn taken_message(taken: &[String]) -> Option<String> {
+    if taken.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Another program already uses: {}. Open Settings from the tray icon and pick different shortcuts.",
+        taken.join(", ")
+    ))
+}
+
 fn error_box(text: &str) {
     let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let title: Vec<u16> = "pane-pogo"
@@ -155,5 +182,22 @@ fn error_box(text: &str) {
 fn unregister_all(ids: &[i32]) {
     for &id in ids {
         hotkeys::unregister(id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::taken_message;
+
+    #[test]
+    fn no_message_when_nothing_is_taken() {
+        assert!(taken_message(&[]).is_none());
+    }
+
+    #[test]
+    fn message_lists_taken_shortcuts() {
+        let msg = taken_message(&["Alt+Shift+W".to_string(), "Alt+Shift+D".to_string()]).unwrap();
+        assert!(msg.contains("Alt+Shift+W, Alt+Shift+D"));
+        assert!(msg.len() < 256, "balloon text must fit");
     }
 }
