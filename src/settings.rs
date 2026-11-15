@@ -869,7 +869,7 @@ impl eframe::App for App {
                                     ui.end_row();
                                     ui.label("Monitor:").on_hover_text(HELP_TILE_ON);
                                 } else {
-                                    ui.label("Monitor:").on_hover_text(HELP_GOES_TO);
+                                    ui.label("Current window on:").on_hover_text(HELP_GOES_TO);
                                 }
                                 ui.horizontal(|ui| {
                                     choice(ui, &mut p.monitor, [
