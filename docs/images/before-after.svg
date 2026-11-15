@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 280" width="760" height="280" font-family="Segoe UI, system-ui, sans-serif">
+  <!-- Before/after: one shortcut tiles the current window beside the previous one. Teal = current, light teal = previous. -->
+  <rect width="760" height="280" rx="14" fill="#ffffff"/>
+
+  <!-- Before -->
+  <text x="170" y="30" text-anchor="middle" font-size="15" font-weight="600" fill="#111827">Before</text>
+  <rect x="20" y="42" width="300" height="190" rx="10" fill="#111827"/>
+  <rect x="28" y="50" width="284" height="164" fill="#e5e7eb"/>
+  <rect x="28" y="214" width="284" height="10" fill="#374151"/>
+  <g stroke="#ffffff" stroke-width="1.5">
+    <rect x="44" y="62" width="140" height="96" rx="3" fill="#d1d5db"/>
+    <rect x="44" y="62" width="140" height="14" rx="3" fill="#9ca3af"/>
+    <rect x="120" y="78" width="170" height="112" rx="3" fill="#99f6e4"/>
+    <rect x="120" y="78" width="170" height="14" rx="3" fill="#5eead4"/>
+    <rect x="64" y="104" width="150" height="100" rx="3" fill="#2dd4bf"/>
+    <rect x="64" y="104" width="150" height="14" rx="3" fill="#14b8a6"/>
+  </g>
+  <text x="139" y="164" text-anchor="middle" font-size="13" fill="#042f2e">Editor</text>
+  <text x="252" y="140" text-anchor="middle" font-size="13" fill="#042f2e">Browser</text>
+  <text x="170" y="256" text-anchor="middle" font-size="13" fill="#4b5563">Windows overlap. You drag and resize by hand.</text>
+
+  <!-- Shortcut -->
+  <rect x="326" y="112" width="108" height="40" rx="8" fill="#111827"/>
+  <rect x="330" y="114" width="100" height="32" rx="6" fill="#374151"/>
+  <text x="380" y="135" text-anchor="middle" font-size="13" fill="#ffffff">Your shortcut</text>
+  <path d="M352 172 h46 m-8 -6 l8 6 l-8 6" fill="none" stroke="#111827" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- After -->
+  <text x="590" y="30" text-anchor="middle" font-size="15" font-weight="600" fill="#111827">After</text>
+  <rect x="440" y="42" width="300" height="190" rx="10" fill="#111827"/>
+  <rect x="448" y="50" width="284" height="164" fill="#e5e7eb"/>
+  <rect x="448" y="214" width="284" height="10" fill="#374151"/>
+  <g stroke="#ffffff" stroke-width="1.5">
+    <rect x="448" y="50" width="142" height="164" fill="#99f6e4"/>
+    <rect x="448" y="50" width="142" height="14" fill="#5eead4"/>
+    <rect x="590" y="50" width="142" height="164" fill="#2dd4bf"/>
+    <rect x="590" y="50" width="142" height="14" fill="#14b8a6"/>
+  </g>
+  <text x="519" y="136" text-anchor="middle" font-size="13" fill="#042f2e">Browser</text>
+  <text x="661" y="136" text-anchor="middle" font-size="13" fill="#042f2e">Editor</text>
+  <text x="590" y="256" text-anchor="middle" font-size="13" fill="#4b5563">One key press. The window you left joins you.</text>
+</svg>
