@@ -2,7 +2,7 @@
 name = "pane-pogo"
 version = "0.1.0"
 edition = "2024"
-description = "Windows tray app that tiles the current window next to the previous one with one shortcut."
+description = "Windows tray app: one key brings your other app next to you, another makes you full screen again."
 license = "MIT"
 repository = "https://github.com/wayanlw/pane-pogo"
 readme = "README.md"

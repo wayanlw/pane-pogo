@@ -3,86 +3,341 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pane-pogo: put two windows side by side with one key press</title>
-<meta name="description" content="A small Windows tray app that tiles the window you're using next to the one you used just before it.">
+<title>pane-pogo: window tiler for multitasking on Windows</title>
+<meta name="description" content="Window tiler for multitasking. One key brings your other app beside you. Another takes you back to full screen. A small Windows tray app.">
 <link rel="icon" href="images/icon-64.png">
 <style>
-  :root { --ink:#111827; --muted:#4b5563; --line:#e5e7eb; --bg:#f9fafb; --accent:#0f766e; --accent-soft:#ccfbf1; }
-  * { box-sizing: border-box; }
-  body { margin:0; font:17px/1.6 system-ui, "Segoe UI", sans-serif; color:var(--ink); background:#fff; }
-  main { max-width:860px; margin:0 auto; padding:0 20px 48px; }
-  header { text-align:center; padding:56px 0 24px; }
-  header img.icon { width:64px; height:64px; }
-  h1 { font-size:2.4rem; margin:12px 0 4px; }
-  .tag { font-size:1.2rem; color:var(--muted); margin:0 auto 24px; max-width:620px; }
-  .btn { display:inline-block; padding:10px 20px; margin:4px; border-radius:8px; text-decoration:none; font-weight:600; border:1px solid var(--accent); }
+  :root {
+    --ink:#111827; --muted:#4b5563; --line:#e2e8e8; --tile:#eef4f3; --paper:#fff;
+    --accent:#0f766e; --teal:#2dd4bf; --teal-soft:#99f6e4;
+    --text:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
+    --display:"Segoe UI Variable Display","Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
+    --mono:ui-monospace,"Cascadia Code",Consolas,monospace;
+  }
+  *, *::before, *::after { box-sizing:border-box; }
+  html { scroll-behavior:smooth; }
+  body { margin:0; font:1.0625rem/1.6 var(--text); color:var(--ink); background:var(--paper); }
+  a { color:var(--accent); }
+  :focus-visible { outline:3px solid var(--accent); outline-offset:3px; border-radius:4px; }
+  .wrap { max-width:1040px; margin:0 auto; padding:0 24px; }
+  h1, h2, h3 { font-family:var(--display); margin:0; letter-spacing:-.02em; }
+  p { margin:0; }
+
+  /* top bar */
+  .bar { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:20px 0; }
+  .brand { display:flex; align-items:center; gap:10px; font:700 1.1rem var(--display); color:var(--ink); text-decoration:none; }
+  .brand img { width:32px; height:32px; }
+  .nav { display:flex; gap:22px; }
+  .nav a { color:var(--muted); text-decoration:none; font-weight:500; }
+  .nav a:hover { color:var(--ink); }
+
+  /* hero */
+  .hero { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.05fr); gap:48px; align-items:center; padding:40px 0 88px; }
+  .hero h1 { font-size:clamp(2.4rem,5.4vw,3.9rem); line-height:1.04; font-weight:750; letter-spacing:-.035em; }
+  .hero .sub { font-size:1.25rem; line-height:1.5; color:var(--muted); margin:20px 0 28px; max-width:30em; }
+  .cta { display:flex; flex-wrap:wrap; gap:12px; }
+  .btn { display:inline-block; padding:12px 22px; border-radius:10px; text-decoration:none; font-weight:650; border:2px solid var(--accent); }
   .btn.primary { background:var(--accent); color:#fff; }
-  .btn.secondary { color:var(--accent); background:#fff; }
-  figure { margin:32px 0; text-align:center; }
-  figure img { max-width:100%; height:auto; border-radius:8px; }
-  figcaption { color:var(--muted); font-size:.9rem; margin-top:8px; }
-  h2 { font-size:1.5rem; margin:40px 0 8px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin:16px 0; }
-  .card { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:16px; }
-  .card b { display:block; margin-bottom:4px; }
-  code { background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:1px 5px; font-size:.9em; }
-  pre { background:var(--ink); color:#f3f4f6; padding:14px 16px; border-radius:8px; overflow:auto; }
-  pre code { background:none; border:0; padding:0; color:inherit; }
-  ul { padding-left:1.2rem; }
-  footer { border-top:1px solid var(--line); padding:20px; text-align:center; color:var(--muted); font-size:.9rem; }
-  footer a, main a { color:var(--accent); }
+  .btn.primary:hover { background:#0b5f58; border-color:#0b5f58; }
+  .btn.ghost { color:var(--accent); background:transparent; }
+  .btn.ghost:hover { background:var(--tile); }
+  .meta { margin-top:18px; color:var(--muted); font-size:.95rem; }
+  .hero-art svg { display:block; width:100%; height:auto; }
+
+  /* hero animation: base state is the split layout, so reduced-motion users see the payoff */
+  .fx { transform-box:fill-box; }
+  .main-win { transform-origin:0 0; transform:scaleX(.49); }
+  .other-win { transform-origin:0 0; }
+  .lab-full { opacity:0; } .lab-split { opacity:1; }
+  .chip-1 { opacity:1; } .chip-2 { opacity:0; }
+  @media (prefers-reduced-motion:no-preference) {
+    .main-win  { animation:main 8s ease-in-out infinite; }
+    .other-win { animation:other 8s ease-in-out infinite; }
+    .lab-full  { animation:labfull 8s ease-in-out infinite; }
+    .lab-split { animation:labsplit 8s ease-in-out infinite; }
+    .chip-1    { animation:chip1 8s ease-in-out infinite; }
+    .chip-2    { animation:chip2 8s ease-in-out infinite; }
+  }
+  @keyframes main { 0%,36% {transform:scaleX(1)} 46%,88% {transform:scaleX(.49)} 96%,100% {transform:scaleX(1)} }
+  @keyframes other { 0%,40% {opacity:0; transform:translateX(36px)} 48%,86% {opacity:1; transform:none} 94%,100% {opacity:0; transform:translateX(36px)} }
+  @keyframes labfull { 0%,34% {opacity:1} 40%,92% {opacity:0} 98%,100% {opacity:1} }
+  @keyframes labsplit { 0%,42% {opacity:0} 50%,84% {opacity:1} 90%,100% {opacity:0} }
+  @keyframes chip1 { 0%,32% {opacity:0} 38%,54% {opacity:1} 60%,100% {opacity:0} }
+  @keyframes chip2 { 0%,80% {opacity:0} 86%,98% {opacity:1} 100% {opacity:0} }
+
+  /* sections */
+  .sec { padding:72px 0; }
+  .sec + .sec { border-top:1px solid var(--line); }
+  .head { max-width:44rem; margin-bottom:40px; }
+  .head h2 { font-size:clamp(1.7rem,3.2vw,2.25rem); font-weight:720; line-height:1.15; }
+  .head p { margin-top:12px; color:var(--muted); font-size:1.15rem; }
+
+  /* storyboard */
+  .frame { fill:#fff; stroke:#111827; stroke-width:3; }
+  .stand { stroke:#111827; stroke-width:3; stroke-linecap:round; }
+  .w-main { fill:var(--teal); stroke:var(--accent); stroke-width:2; }
+  .w-other { fill:var(--teal-soft); stroke:var(--accent); stroke-width:2; }
+  .lbl { font:600 11px var(--text); fill:#064e3b; text-anchor:middle; }
+  .t-mut { font:500 11px var(--text); fill:var(--muted); text-anchor:middle; }
+  .arrow { stroke:var(--accent); stroke-width:2.5; fill:none; stroke-linecap:round; stroke-linejoin:round; }
+  .story { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:44px 28px; }
+  .step-top { display:flex; align-items:center; justify-content:space-between; min-height:30px; margin-bottom:10px; }
+  .num { display:inline-grid; place-items:center; width:28px; height:28px; border-radius:50%; background:var(--accent); color:#fff; font:700 .9rem var(--text); }
+  .key { display:inline-block; background:var(--ink); color:#fff; font:600 .82rem var(--text); padding:3px 11px; border-radius:6px; border-bottom:3px solid #374151; }
+  .tile { display:block; width:100%; height:auto; background:var(--tile); border-radius:14px; padding:14px; }
+  .step h3 { font-size:1.1rem; font-weight:680; margin-top:16px; letter-spacing:-.01em; }
+  .step p { color:var(--muted); margin-top:4px; }
+
+  /* facts */
+  .facts { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:32px 28px; }
+  .fact { border-top:3px solid var(--accent); padding-top:16px; }
+  .fact h3 { font-size:1.1rem; font-weight:680; }
+  .fact p { color:var(--muted); margin-top:6px; }
+
+  /* showcase panels */
+  .panel { background:var(--paper); border:1px solid var(--line); border-radius:16px; padding:24px; }
+  .panel img { display:block; width:100%; height:auto; }
+  .split { display:grid; grid-template-columns:minmax(0,5fr) minmax(0,7fr); gap:48px; align-items:center; }
+  .split .txt p { color:var(--muted); }
+  .split .txt p + p { margin-top:14px; }
+  .shot { display:block; width:100%; height:auto; border-radius:10px; border:1px solid var(--line); box-shadow:0 12px 32px rgba(17,24,39,.12); }
+  code { font-family:var(--mono); font-size:.9em; background:var(--tile); border-radius:5px; padding:1px 6px; }
+
+  /* install band */
+  .band { background:var(--ink); color:#f3f4f6; }
+  .band .head h2 { color:#fff; }
+  .band .head p, .band .small { color:#cbd5e1; }
+  .band a { color:var(--teal-soft); }
+  .band :focus-visible { outline-color:var(--teal-soft); }
+  .band .btn.primary { background:var(--teal); border-color:var(--teal); color:var(--ink); }
+  .band .btn.primary:hover { background:var(--teal-soft); border-color:var(--teal-soft); }
+  .install { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:48px; }
+  .install h3 { color:#fff; font-size:1.1rem; font-weight:680; margin-bottom:10px; }
+  .install p + p { margin-top:12px; }
+  .band pre { margin:0; background:#0b1220; border:1px solid #1f2937; border-radius:12px; padding:16px 18px; overflow:auto; font:.95rem/1.6 var(--mono); }
+  .band code { background:#1f2937; color:#e5e7eb; }
+  .band pre code { background:none; padding:0; color:#e5e7eb; }
+  .small { font-size:.95rem; margin-top:28px; }
+
+  footer { padding:36px 0 48px; color:var(--muted); font-size:.95rem; }
+  footer .wrap { display:flex; flex-wrap:wrap; gap:12px 28px; justify-content:space-between; }
+  footer nav { display:flex; flex-wrap:wrap; gap:8px 22px; }
+
+  @media (max-width:900px) {
+    .hero { grid-template-columns:minmax(0,1fr); gap:32px; padding-bottom:56px; }
+    .story { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .facts { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .split, .install { grid-template-columns:minmax(0,1fr); gap:28px; }
+    .sec { padding:56px 0; }
+  }
+  @media (max-width:600px) {
+    .nav { gap:16px; }
+    .story, .facts { grid-template-columns:minmax(0,1fr); }
+  }
 </style>
 </head>
 <body>
-<main>
-  <header>
-    <img class="icon" src="images/icon-64.png" alt="pane-pogo icon">
-    <h1>pane-pogo</h1>
-    <p class="tag"><b>Put two windows side by side with one key press.</b><br>
-    A small Windows tray app that tiles the window you're using next to the one you used just before it.</p>
-    <a class="btn primary" href="https://github.com/wayanlw/pane-pogo/releases/latest">Download for Windows</a>
-    <a class="btn secondary" href="https://github.com/wayanlw/pane-pogo">View on GitHub</a>
-  </header>
 
-  <figure>
-    <img src="images/before-after.svg" alt="Before: three overlapping windows. After pressing one shortcut: Browser and Editor share the screen, half each.">
-  </figure>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="s-full" viewBox="0 0 120 84"><title>One monitor, main app full screen</title>
+      <rect class="frame" x="2" y="2" width="116" height="68" rx="6"/><rect class="w-main" x="9" y="9" width="102" height="54" rx="3"/>
+      <text class="lbl" x="60" y="40">Main app</text>
+      <line class="stand" x1="40" y1="79" x2="80" y2="79"/><line class="stand" x1="60" y1="70" x2="60" y2="79"/></symbol>
+    <symbol id="s-split" viewBox="0 0 120 84"><title>One monitor, main app left, other app beside it</title>
+      <rect class="frame" x="2" y="2" width="116" height="68" rx="6"/>
+      <rect class="w-main" x="9" y="9" width="49" height="54" rx="3"/><rect class="w-other" x="62" y="9" width="49" height="54" rx="3"/>
+      <text class="lbl" x="33.5" y="40">Main</text><text class="lbl" x="86.5" y="40">Other</text>
+      <line class="stand" x1="40" y1="79" x2="80" y2="79"/><line class="stand" x1="60" y1="70" x2="60" y2="79"/></symbol>
+    <symbol id="s-dual" viewBox="0 0 250 84"><title>Two monitors, one app full screen on each</title>
+      <rect class="frame" x="2" y="2" width="116" height="68" rx="6"/><rect class="w-main" x="9" y="9" width="102" height="54" rx="3"/>
+      <text class="lbl" x="60" y="40">Main app</text>
+      <line class="stand" x1="40" y1="79" x2="80" y2="79"/><line class="stand" x1="60" y1="70" x2="60" y2="79"/>
+      <rect class="frame" x="132" y="2" width="116" height="68" rx="6"/><rect class="w-other" x="139" y="9" width="102" height="54" rx="3"/>
+      <text class="lbl" x="190" y="40">Other app</text>
+      <line class="stand" x1="170" y1="79" x2="210" y2="79"/><line class="stand" x1="190" y1="70" x2="190" y2="79"/></symbol>
+    <symbol id="s-dualswap" viewBox="0 0 250 84"><title>Two monitors, the other app now on the first monitor, main app on the second</title>
+      <rect class="frame" x="2" y="2" width="116" height="68" rx="6"/><rect class="w-other" x="9" y="9" width="102" height="54" rx="3"/>
+      <text class="lbl" x="60" y="40">Other app</text>
+      <line class="stand" x1="40" y1="79" x2="80" y2="79"/><line class="stand" x1="60" y1="70" x2="60" y2="79"/>
+      <rect class="frame" x="132" y="2" width="116" height="68" rx="6"/><rect class="w-main" x="139" y="9" width="102" height="54" rx="3"/>
+      <text class="lbl" x="190" y="40">Main app</text>
+      <line class="stand" x1="170" y1="79" x2="210" y2="79"/><line class="stand" x1="190" y1="70" x2="190" y2="79"/></symbol>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M1 1 L9 5 L1 9" fill="none" stroke="#0f766e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+</svg>
 
-  <h2>Why it exists</h2>
-  <p>You're writing in one window and reading from another. They overlap, so you keep switching, dragging and resizing. Windows Snap places one window at a time. pane-pogo arranges the window you're in and the one you used just before it, with a single shortcut.</p>
-
-  <div class="grid">
-    <div class="card"><b>One shortcut, one layout</b>Each shortcut stores its layout, monitor, side and where focus ends up.</div>
-    <div class="card"><b>Unequal splits</b>Halves, 2/3 + 1/3, 1/3 + 2/3, or one window per monitor.</div>
-    <div class="card"><b>Private by design</b>Works offline. No network code, no telemetry, no account.</div>
+<div class="wrap">
+  <div class="bar">
+    <a class="brand" href="#top"><img src="images/icon-64.png" alt="">pane-pogo</a>
+    <nav class="nav" aria-label="Page">
+      <a href="#how">How it works</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/wayanlw/pane-pogo">GitHub</a>
+    </nav>
   </div>
 
-  <h2>Layouts</h2>
-  <figure>
-    <img src="images/layouts.svg" alt="Two-window layouts: halves, 2/3 + 1/3, full screen one per monitor, swap places. One-window layouts: full screen on a monitor, left or right half, move to next monitor.">
-  </figure>
+  <header class="hero" id="top">
+    <div>
+      <h1>Window tiler for multitasking</h1>
+      <p class="sub">One key brings your other app beside you. Another takes you back to full screen.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/wayanlw/pane-pogo/releases/latest">Download for Windows</a>
+        <a class="btn ghost" href="https://github.com/wayanlw/pane-pogo">View on GitHub</a>
+      </div>
+      <p class="meta">Windows 11. About 8 MB. Free and open source.</p>
+    </div>
+    <div class="hero-art">
+      <svg viewBox="0 0 480 350" role="img" aria-label="A monitor looping between one app full screen and two apps side by side, as Shortcut 1 and Shortcut 2 are pressed.">
+        <title>Full screen, then side by side, then full screen again</title>
+        <rect x="10" y="10" width="460" height="270" rx="20" fill="#fff" stroke="#111827" stroke-width="8"/>
+        <rect x="28" y="28" width="424" height="234" rx="9" fill="#eef4f3"/>
+        <line x1="190" y1="316" x2="290" y2="316" stroke="#111827" stroke-width="8" stroke-linecap="round"/>
+        <line x1="240" y1="282" x2="240" y2="316" stroke="#111827" stroke-width="8" stroke-linecap="round"/>
+        <g class="fx main-win">
+          <rect x="36" y="36" width="408" height="218" rx="8" fill="#2dd4bf" stroke="#0f766e" stroke-width="3"/>
+          <rect x="36" y="36" width="408" height="24" rx="8" fill="#0f766e"/>
+        </g>
+        <g class="fx other-win">
+          <rect x="244" y="36" width="200" height="218" rx="8" fill="#99f6e4" stroke="#0f766e" stroke-width="3"/>
+          <rect x="244" y="36" width="200" height="24" rx="8" fill="#0f766e"/>
+        </g>
+        <text class="lab-full" x="240" y="156" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="22" font-weight="650" fill="#064e3b">Main app</text>
+        <text class="lab-split" x="136" y="156" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="22" font-weight="650" fill="#064e3b">Main app</text>
+        <text class="lab-split" x="344" y="156" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="22" font-weight="650" fill="#064e3b">Other app</text>
+        <g class="chip-1"><rect x="176" y="326" width="128" height="22" rx="7" fill="#111827"/><text x="240" y="342" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="13" font-weight="650" fill="#fff">Shortcut 1</text></g>
+        <g class="chip-2"><rect x="176" y="326" width="128" height="22" rx="7" fill="#111827"/><text x="240" y="342" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="13" font-weight="650" fill="#fff">Shortcut 2</text></g>
+      </svg>
+    </div>
+  </header>
+</div>
 
-  <h2>Set up your shortcuts</h2>
-  <figure>
-    <img src="images/settings.png" width="700" alt="The pane-pogo shortcuts window. Each row shows a layout preview, the action, its monitor and the shortcut.">
-    <figcaption>Right-click the tray icon and choose Settings.</figcaption>
-  </figure>
-  <p>On first run, <code>Alt+Shift+E</code> puts the current window on the left half of the primary monitor, and <code>Alt+Shift+R</code> on the right half.</p>
+<main>
+  <section class="sec" id="how">
+    <div class="wrap">
+      <div class="head">
+        <h2>How a day with it goes</h2>
+        <p>No dragging, no resizing, no picking from thumbnails. pane-pogo remembers which window you came from.</p>
+      </div>
+      <div class="story">
+        <article class="step">
+          <div class="step-top"><span class="num">1</span></div>
+          <svg class="tile" viewBox="-65 -58 250 200" role="img" aria-label="Main app full screen"><use href="#s-full" x="0" y="0" width="120" height="84"/></svg>
+          <h3>You work full screen in your main app.</h3>
+        </article>
+        <article class="step">
+          <div class="step-top"><span class="num">2</span><span class="key">Shortcut 1</span></div>
+          <svg class="tile" viewBox="-65 -58 250 200" role="img" aria-label="Other app beside the main app"><use href="#s-split" x="0" y="0" width="120" height="84"/></svg>
+          <h3>You need the other app.</h3>
+          <p>One key brings it next to you.</p>
+        </article>
+        <article class="step">
+          <div class="step-top"><span class="num">3</span><span class="key">Shortcut 2</span></div>
+          <svg class="tile" viewBox="-65 -58 250 200" role="img" aria-label="Main app full screen again"><use href="#s-full" x="0" y="0" width="120" height="84"/></svg>
+          <h3>You're done with it.</h3>
+          <p>One key makes your main app full screen again.</p>
+        </article>
+        <article class="step">
+          <div class="step-top"><span class="num">4</span></div>
+          <svg class="tile" viewBox="-10 -57 250 200" role="img" aria-label="Loop between full screen and side by side">
+            <use href="#s-full" x="0" y="0" width="100" height="70"/>
+            <path class="arrow" d="M104 28 H126" marker-end="url(#ah)"/>
+            <path class="arrow" d="M126 46 H104" marker-end="url(#ah)"/>
+            <use href="#s-split" x="130" y="0" width="100" height="70"/>
+            <text class="t-mut" x="115" y="86">&#8635; loop</text>
+          </svg>
+          <h3>Repeat as often as you like.</h3>
+          <p>Shortcut 1, then Shortcut 2, all day.</p>
+        </article>
+        <article class="step">
+          <div class="step-top"><span class="num">5</span><span class="key">Shortcut 3</span></div>
+          <svg class="tile" viewBox="0 0 250 200" role="img" aria-label="Cramped on one monitor, then the other app moves to the second monitor">
+            <use href="#s-split" x="65" y="0" width="120" height="84"/>
+            <path class="arrow" d="M125 90 V110" marker-end="url(#ah)"/>
+            <use href="#s-dual" x="0" y="116" width="250" height="84"/>
+          </svg>
+          <h3>Not enough room?</h3>
+          <p>Use both monitors. One key moves the other app to the other screen.</p>
+        </article>
+        <article class="step">
+          <div class="step-top"><span class="num">6</span><span class="key">Shortcut 4</span></div>
+          <svg class="tile" viewBox="0 0 250 200" role="img" aria-label="The two monitors swap apps; the main app stays full screen on the other monitor">
+            <use href="#s-dual" x="0" y="0" width="250" height="84"/>
+            <path class="arrow" d="M125 90 V110" marker-end="url(#ah)"/>
+            <use href="#s-dualswap" x="0" y="116" width="250" height="84"/>
+          </svg>
+          <h3>Want to work in the other app?</h3>
+          <p>One key swaps the screens. Your main app stays full screen on the other monitor.</p>
+        </article>
+      </div>
+    </div>
+  </section>
 
-  <h2>Install</h2>
-  <p>Download <code>pane-pogo.exe</code> from the <a href="https://github.com/wayanlw/pane-pogo/releases/latest">latest release</a> and run it. It appears in the system tray. To start it at sign-in, tick <b>Start with Windows</b> in the tray menu.</p>
-  <p>To build from source, install <a href="https://rustup.rs">Rust</a>, then:</p>
-  <pre><code>cargo build --release
+  <section class="sec">
+    <div class="wrap">
+      <div class="head"><h2>Built to stay out of the way</h2></div>
+      <div class="facts">
+        <div class="fact"><h3>One shortcut, one layout</h3><p>Each shortcut stores its layout, monitor, side and where focus ends up.</p></div>
+        <div class="fact"><h3>Unequal splits</h3><p>Halves, 2/3 + 1/3, 1/3 + 2/3, or one window per monitor.</p></div>
+        <div class="fact"><h3>Small, fast, light</h3><p>Written in Rust. One ~8 MB file, no installer, and it uses under 1 MB of RAM while it sits in the tray.</p></div>
+        <div class="fact"><h3>Private by design</h3><p>Works offline. No network code, no telemetry, no account.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="wrap">
+      <div class="head">
+        <h2>Every layout you need</h2>
+        <p>Two-window layouts for the pair you are working with, and one-window layouts for everything else.</p>
+      </div>
+      <div class="panel">
+        <img src="images/layouts.svg" alt="Two-window layouts: halves, 2/3 + 1/3, full screen one per monitor, swap places. One-window layouts: full screen on a monitor, left or right half, move to next monitor.">
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="wrap split">
+      <div class="txt">
+        <div class="head" style="margin-bottom:20px"><h2>Set up your shortcuts</h2></div>
+        <p>Right-click the tray icon and choose <b>Settings</b>. Add a shortcut, pick what it does, and press the keys you want.</p>      </div>
+      <img class="shot" src="images/settings.png" width="700" alt="The pane-pogo shortcuts window. Each row shows a layout preview, the action, its monitor and the shortcut.">
+    </div>
+  </section>
+
+  <section class="sec band" id="install">
+    <div class="wrap">
+      <div class="head"><h2>Install</h2></div>
+      <div class="install">
+        <div>
+          <h3>Download</h3>
+          <p>Get <code>pane-pogo.exe</code> from the latest release and run it. It appears in the system tray. To start it at sign-in, tick <b>Start with Windows</b> in the tray menu.</p>
+          <p style="margin-top:20px"><a class="btn primary" href="https://github.com/wayanlw/pane-pogo/releases/latest">Download for Windows</a></p>
+        </div>
+        <div>
+          <h3>Build from source</h3>
+          <p style="margin-bottom:12px">Install <a href="https://rustup.rs">Rust</a>, then:</p>
+          <pre><code>cargo build --release
 .\target\release\pane-pogo.exe</code></pre>
-  <p>Requires Windows 11. Windows 10 is untested. The exe isn't code-signed, so SmartScreen may warn on first run.</p>
-
-  <h2>Docs</h2>
-  <ul>
-    <li><a href="https://github.com/wayanlw/pane-pogo#readme">README</a>, including known limitations</li>
-    <li><a href="https://github.com/wayanlw/pane-pogo/blob/main/docs/how-to.md">How to use pane-pogo</a></li>
-    <li><a href="https://github.com/wayanlw/pane-pogo/blob/main/docs/spec.md">Specification</a></li>
-  </ul>
+        </div>
+      </div>
+      <p class="small">Requires Windows 11. Windows 10 is untested. The exe isn't code-signed, so SmartScreen may warn on first run.</p>
+    </div>
+  </section>
 </main>
-<footer>MIT licensed. <a href="https://github.com/wayanlw/pane-pogo">github.com/wayanlw/pane-pogo</a></footer>
+
+<footer>
+  <div class="wrap">
+    <nav aria-label="Docs">
+      <a href="https://github.com/wayanlw/pane-pogo#readme">README</a>
+      <a href="https://github.com/wayanlw/pane-pogo/blob/main/docs/how-to.md">How to use pane-pogo</a>
+      <a href="https://github.com/wayanlw/pane-pogo/blob/main/docs/spec.md">Specification</a>
+      <a href="https://github.com/wayanlw/pane-pogo">GitHub</a>
+    </nav>
+    <span>MIT licensed</span>
+  </div>
+</footer>
 </body>
 </html>

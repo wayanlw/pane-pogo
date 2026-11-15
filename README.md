@@ -4,8 +4,8 @@
 
 <h1 align="center">pane-pogo</h1>
 
-<p align="center"><b>Put two windows side by side with one key press.</b><br>
-A small Windows tray app that tiles the window you're using next to the one you used just before it.</p>
+<p align="center"><b>Need a second app beside you? One key.</b><br>
+Work full screen. Press a shortcut and the app you used just before lands next to you. Press another and you're full screen again.</p>
 
 <p align="center">
   <img src="docs/images/before-after.svg" alt="Before: three overlapping windows. After pressing one shortcut: Browser and Editor share the screen, half each.">
@@ -19,7 +19,16 @@ You're writing in one window and reading from another. They overlap, so you keep
 
 Press a shortcut, and pane-pogo arranges the window you're in and the window you used just before it. It tracks which window you came from, so you never reach for the mouse or pick from thumbnails.
 
-Each shortcut stores its own layout (halves, 2/3 + 1/3, 1/3 + 2/3, or one window per monitor), the side the current window goes to, the monitor it uses, and the window you can type in afterwards. So `Alt+Shift+W` can mean "browser on the left, me on the right, keep typing here", and `Alt+Shift+Q` can mean "notes as a 1/3 strip on the second monitor".
+A typical day:
+
+1. You work full screen in your main app.
+2. You need the other app. One key brings it next to you.
+3. You're done with it. One key makes your main app full screen again.
+4. Repeat as often as you like.
+5. With two monitors, one key puts each app full screen on its own monitor.
+6. If your focus moves to the other app, use **Swap places** to trade their positions.
+
+Each shortcut stores its own layout (halves, 2/3 + 1/3, 1/3 + 2/3, or one window per monitor), the side the current window goes to, the monitor it uses, and the window you can type in afterwards. So one shortcut can mean "browser on the left, me on the right, keep typing here", and another can mean "notes as a 1/3 strip on the second monitor".
 
 ## Layouts
 
@@ -65,8 +74,6 @@ Right-click the tray icon and choose **Settings...**
 3. Click the shortcut box and press the keys: Ctrl, Alt or Shift with a letter, a number or F1 to F12. **Esc** cancels.
 4. Expand the row with **›** to choose the side, the monitor and the final focus.
 5. Click **Save changes**. The shortcut works at once.
-
-On first run, two shortcuts are ready: `Alt+Shift+E` puts the current window on the left half of the primary monitor, and `Alt+Shift+R` on the right half.
 
 If another program already uses a shortcut, Settings says so on that row. Pick a different one.
 
