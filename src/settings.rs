@@ -272,7 +272,7 @@ impl App {
         }
     }
 
-    /// Keeps the broken file as bindings.broken.json and starts from the defaults.
+    /// Keeps the broken file as bindings.broken.json and starts with no shortcuts.
     fn start_fresh(&mut self) {
         let Ok(path) = config::path() else {
             return;

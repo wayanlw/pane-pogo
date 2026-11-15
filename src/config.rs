@@ -145,13 +145,13 @@ pub fn load_status() -> Status {
         .unwrap_or_default()
 }
 
-/// Loads the config. If the file is missing, writes the default one (TileLeft and TileRight only).
+/// Loads the config. If the file is missing, writes an empty one: the user sets up their own shortcuts.
 pub fn load() -> Result<Config, String> {
     let path = path()?;
     match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let cfg = default_config();
+            let cfg = Config::default();
             save(&cfg)?;
             Ok(cfg)
         }
@@ -166,21 +166,4 @@ pub fn save(cfg: &Config) -> Result<(), String> {
     }
     let text = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
     fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-fn default_config() -> Config {
-    Config {
-        bindings: vec![
-            Binding {
-                shortcut: "Alt+Shift+E".into(),
-                action: Action::TileLeft,
-                pair: None,
-            },
-            Binding {
-                shortcut: "Alt+Shift+R".into(),
-                action: Action::TileRight,
-                pair: None,
-            },
-        ],
-    }
 }

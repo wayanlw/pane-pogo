@@ -48,7 +48,7 @@ Check these in order:
 `bindings.json` could not be read, so no shortcuts are active. Open **Settings...** from the tray, then choose one:
 
 - **Open file:** fix it in Notepad, then click **Try again**.
-- **Start fresh:** keeps the broken file as `bindings.broken.json` and loads the default shortcuts.
+- **Start fresh:** keeps the broken file as `bindings.broken.json` and starts with no shortcuts.
 
 ## Stop or uninstall
 

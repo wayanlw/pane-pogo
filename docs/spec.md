@@ -58,7 +58,7 @@ Only the four "Side by side" and "Full screen on separate monitors" actions use 
 - **Key repeat:** holding the keys fires the action once.
 - **Uniqueness:** each shortcut may appear once in the list.
 - **Conflicts:** a shortcut another program holds cannot register. pane-pogo skips it, logs it, lists it in `status.json`, and Settings marks the row.
-- **Defaults:** when `bindings.json` does not exist, pane-pogo creates it with `Alt+Shift+E` → `tile_left` and `Alt+Shift+R` → `tile_right`.
+- **Defaults:** when `bindings.json` does not exist, pane-pogo creates it empty. No shortcuts are assigned until the user adds them in Settings.
 
 ## Files
 
