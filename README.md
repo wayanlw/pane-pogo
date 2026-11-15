@@ -118,7 +118,7 @@ pane-pogo works offline. It has no network code, no telemetry and no account. Yo
 - Windows running as administrator can't be moved, because pane-pogo doesn't run as administrator.
 - An app that can't shrink to 1/3 of the screen overlaps its neighbour.
 - With three or more monitors, which one counts as "secondary" can change after docking or a restart.
-- `Alt+Shift` also switches the input language when you have several keyboard layouts installed. Use `Ctrl+Shift` shortcuts instead.
+- `Alt+Shift` also switches the input language when you have several keyboard layouts installed. The default shortcuts use `Alt+Shift`, so change them to `Ctrl+Shift` in Settings if this affects you.
 - SmartScreen may warn on first run, because the exe isn't code-signed yet.
 
 ## Uninstall

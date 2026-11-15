@@ -36,7 +36,7 @@ If another program already uses one of them, pane-pogo shows a notification on f
 2. Click **Add shortcut**, or edit an existing row.
 3. Pick the **Action**. Hover over an action or an ℹ icon to see what it does.
 4. Click the **Shortcut** box and press the keys. Hold Ctrl, Alt or Shift, then press a letter, number or F1–F12. **Esc** cancels.
-5. Set the rows under the action. **Full screen on one monitor**: **Monitor**. **Half of one monitor**: **Monitor** and **Side**. Two-window actions: **Current window on**, **Tile on** or **Current window goes to**, and **Focus after**.
+5. Set the rows under the action. **Full screen on one monitor**: **Monitor**. **Half of one monitor**: **Monitor** and **Side**. Two-window actions: **Current window on** (Left or Right for side-by-side layouts, or a monitor for Full screen on separate monitors), **Monitor** (side-by-side layouts only), and **Final focus**.
 6. Click **Save**. The shortcuts work at once. You don't need to restart.
 
 A red message on a row blocks saving until you fix it. An orange message is only a warning.
