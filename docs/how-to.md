@@ -1,4 +1,4 @@
-# How to use pane-pogo
+# How to use Pane Pogo
 
 Task steps. For the exact rules behind each action, setting and file, see [spec.md](spec.md).
 
@@ -15,7 +15,7 @@ Task steps. For the exact rules behind each action, setting and file, see [spec.
 
 ## Default shortcuts
 
-On first run, pane-pogo creates these shortcuts. They are only defaults: change or remove any of them in Settings.
+On first run, Pane Pogo creates these shortcuts. They are only defaults: change or remove any of them in Settings.
 
 | Shortcut | What happens |
 |---|---|
@@ -28,7 +28,7 @@ On first run, pane-pogo creates these shortcuts. They are only defaults: change 
 | `Alt+Shift+S` | Swap places: the two windows trade position and size. |
 | `Alt+Shift+Z` | Move the current window to the next monitor, keeping its size. |
 
-If another program already uses one of them, pane-pogo shows a notification on first run and Settings marks that row. Pick a different shortcut there.
+If another program already uses one of them, Pane Pogo shows a notification on first run and Settings marks that row. Pick a different shortcut there.
 
 ## Add or change a shortcut
 
@@ -55,7 +55,7 @@ A red message on a row blocks saving until you fix it. An orange message is only
 
 Check these in order:
 
-1. **Is pane-pogo running?** Look for the tray icon. Settings shows a banner when it isn't running.
+1. **Is Pane Pogo running?** Look for the tray icon. Settings shows a banner when it isn't running.
 2. **Does the row show "Another program already uses this shortcut"?** Pick a different shortcut, or close the program that holds it.
 3. **Was the current window minimised, cloaked or elevated?** Those windows are skipped. See the Known limitations in [spec.md](spec.md).
 4. **Read the log** at `%APPDATA%\pane-pogo\pane-pogo.log`. Each start lists every shortcut as `Registered` or `Skipped`, with the reason.

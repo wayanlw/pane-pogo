@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/icon-64.png" width="64" height="64" alt="pane-pogo icon">
+  <img src="assets/icon-64.png" width="64" height="64" alt="Pane Pogo icon">
 </p>
 
-<h1 align="center">pane-pogo</h1>
+<h1 align="center">Pane Pogo</h1>
 
 <p align="center"><b>Need a second app beside you? One key.</b><br>
 Work full screen. Press a shortcut and the app you used just before lands next to you. Press another and you're full screen again.</p>
@@ -15,9 +15,9 @@ Work full screen. Press a shortcut and the app you used just before lands next t
 
 You're writing in one window and reading from another. They overlap, so you keep switching, dragging and resizing. Windows Snap helps, but it places one window at a time. You snap the first, then pick the second from a row of thumbnails, and you do it all again for the next pair.
 
-## What pane-pogo does
+## What Pane Pogo does
 
-Press a shortcut, and pane-pogo arranges the window you're in and the window you used just before it. It tracks which window you came from, so you never reach for the mouse or pick from thumbnails.
+Press a shortcut, and Pane Pogo arranges the window you're in and the window you used just before it. It tracks which window you came from, so you never reach for the mouse or pick from thumbnails.
 
 A typical day:
 
@@ -48,7 +48,7 @@ Each shortcut stores its own layout (halves, 2/3 + 1/3, 1/3 + 2/3, or one window
 
 ## When to use it
 
-pane-pogo fits you if:
+Pane Pogo fits you if:
 
 - You work in pairs of windows: code and docs, email and calendar, a spreadsheet and the report it feeds.
 - You'd rather press keys than drag windows around.
@@ -77,7 +77,7 @@ Right-click the tray icon and choose **Settings...**
 
 ### Default shortcuts
 
-On first run, pane-pogo creates these shortcuts. They are only defaults: change or remove any of them in Settings.
+On first run, Pane Pogo creates these shortcuts. They are only defaults: change or remove any of them in Settings.
 
 | Shortcut | What happens |
 |---|---|
@@ -90,13 +90,13 @@ On first run, pane-pogo creates these shortcuts. They are only defaults: change 
 | `Alt+Shift+S` | Swap places: the two windows trade position and size. |
 | `Alt+Shift+Z` | Move the current window to the next monitor, keeping its size. |
 
-If another program already uses one of them, pane-pogo shows a notification on first run and Settings marks that row. Pick a different shortcut there.
+If another program already uses one of them, Pane Pogo shows a notification on first run and Settings marks that row. Pick a different shortcut there.
 
 ## Install
 
 Download `pane-pogo.exe` from the [latest release](../../releases/latest) and run it. It appears in the system tray; if you can't see it, look under the `^` arrow.
 
-To start it at sign-in, right-click the tray icon and tick **Start with Windows**. pane-pogo copies itself to `%LOCALAPPDATA%\Programs\pane-pogo\` and starts from there.
+To start it at sign-in, right-click the tray icon and tick **Start with Windows**. Pane Pogo copies itself to `%LOCALAPPDATA%\Programs\pane-pogo\` and starts from there.
 
 To build from source, install [Rust](https://rustup.rs), then run:
 
@@ -109,13 +109,13 @@ Requirements: Windows 11. Windows 10 is untested.
 
 ## Privacy
 
-pane-pogo works offline. It has no network code, no telemetry and no account. Your shortcuts live in `%APPDATA%\pane-pogo\bindings.json`, a plain text file you can read, edit or back up.
+Pane Pogo works offline. It has no network code, no telemetry and no account. Your shortcuts live in `%APPDATA%\pane-pogo\bindings.json`, a plain text file you can read, edit or back up.
 
 ## Known limitations
 
 - Monitors with different display scaling can make windows land in the wrong place.
 - Windows' invisible resize borders leave gaps of about 7 px between tiled windows.
-- Windows running as administrator can't be moved, because pane-pogo doesn't run as administrator.
+- Windows running as administrator can't be moved, because Pane Pogo doesn't run as administrator.
 - An app that can't shrink to 1/3 of the screen overlaps its neighbour.
 - With three or more monitors, which one counts as "secondary" can change after docking or a restart.
 - `Alt+Shift` also switches the input language when you have several keyboard layouts installed. The default shortcuts use `Alt+Shift`, so change them to `Ctrl+Shift` in Settings if this affects you.
@@ -129,7 +129,7 @@ pane-pogo works offline. It has no network code, no telemetry and no account. Yo
 
 ## More
 
-- [How to use pane-pogo](docs/how-to.md)
+- [How to use Pane Pogo](docs/how-to.md)
 - [Specification](docs/spec.md)
 - [Project site](https://wayanlw.github.io/pane-pogo/)
 

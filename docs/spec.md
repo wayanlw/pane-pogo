@@ -1,11 +1,11 @@
-# pane-pogo specification
+# Pane Pogo specification
 
-This file defines how pane-pogo behaves.
+This file defines how Pane Pogo behaves.
 
 ## Terms
 
 - **Current window**: the foreground window when a shortcut is pressed.
-- **Previous window**: the most recently focused window other than the current one, taken from focus history recorded since pane-pogo started. A window only counts as current or previous if it is **valid**: visible, not minimised, has a title, and is not cloaked (cloaked covers windows on other virtual desktops and suspended Store apps).
+- **Previous window**: the most recently focused window other than the current one, taken from focus history recorded since Pane Pogo started. A window only counts as current or previous if it is **valid**: visible, not minimised, has a title, and is not cloaked (cloaked covers windows on other virtual desktops and suspended Store apps).
 - **Primary monitor**: the monitor Windows marks as primary.
 - **Secondary monitor**: the first non-primary monitor in Windows' enumeration order.
 - **Work area**: a monitor's area minus the taskbar. All placement uses work areas, in each monitor's own size.
@@ -57,8 +57,8 @@ Only the four "Side by side" and "Full screen on separate monitors" actions use 
 - **Recording:** the Settings recorder captures Ctrl, Alt and Shift. `Win` works only when written in `bindings.json`.
 - **Key repeat:** holding the keys fires the action once.
 - **Uniqueness:** each shortcut may appear once in the list.
-- **Conflicts:** a shortcut another program holds cannot register. pane-pogo skips it, logs it, lists it in `status.json`, and Settings marks the row.
-- **Defaults:** when `bindings.json` does not exist, pane-pogo creates it with eight default shortcuts: `Alt+Shift+1` → `full_primary`, `Alt+Shift+2` → `full_secondary`, `Alt+Shift+E` → `tile_left`, `Alt+Shift+R` → `tile_right`, `Alt+Shift+W` → `tile_windows` (current window left, primary monitor, focus stays), `Alt+Shift+D` → `tile_dual_monitors` (current window on the primary monitor, focus stays), `Alt+Shift+S` → `swap_windows` and `Alt+Shift+Z` → `move_to_next_monitor`. The user can change or remove every one in Settings. If another program already holds a default, pane-pogo skips it, marks the row in Settings and shows one tray notification on that first run.
+- **Conflicts:** a shortcut another program holds cannot register. Pane Pogo skips it, logs it, lists it in `status.json`, and Settings marks the row.
+- **Defaults:** when `bindings.json` does not exist, Pane Pogo creates it with eight default shortcuts: `Alt+Shift+1` → `full_primary`, `Alt+Shift+2` → `full_secondary`, `Alt+Shift+E` → `tile_left`, `Alt+Shift+R` → `tile_right`, `Alt+Shift+W` → `tile_windows` (current window left, primary monitor, focus stays), `Alt+Shift+D` → `tile_dual_monitors` (current window on the primary monitor, focus stays), `Alt+Shift+S` → `swap_windows` and `Alt+Shift+Z` → `move_to_next_monitor`. The user can change or remove every one in Settings. If another program already holds a default, Pane Pogo skips it, marks the row in Settings and shows one tray notification on that first run.
 
 ## Files
 
@@ -100,7 +100,7 @@ Only the four "Side by side" and "Full screen on separate monitors" actions use 
 
 ## Known limitations
 
-- Monitors with different scaling (DPI) can place windows off-target. pane-pogo does not declare DPI awareness.
+- Monitors with different scaling (DPI) can place windows off-target. Pane Pogo does not declare DPI awareness.
 - Windows' invisible resize borders leave visible gaps of about 7 px between tiled windows.
 - Elevated (administrator) windows cannot be moved.
 - Apps with a minimum width larger than the target part, such as a 1/3 split on a small screen, overlap the other window.
