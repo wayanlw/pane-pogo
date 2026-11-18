@@ -1,15 +1,58 @@
-//! Settings window. Runs as a separate process (`pane-pogo.exe --settings`), so its
-//! event loop does not clash with the tray app's Win32 message loop.
+//! Settings window. Runs as a separate process (`pane-pogo.exe --settings`), so a crash here
+//! never takes the tray app's hotkeys down with it.
+//!
+//! Plain Win32 and GDI, no GPU renderer, so the window costs a few MB of memory. It works like
+//! an immediate-mode UI: one layout function per pane both paints and returns the clickable
+//! items, so painting and hit-testing always agree.
 
-use crate::config::{self, Action, Binding, Config, Focus, MonitorRole, Order, PairSettings};
+use crate::config::{self, Action, Binding, Config, Focus, MonitorRole, Order};
 use crate::hotkeys;
 use crate::layout::Layout;
-use eframe::egui::{self, Color32, RichText};
-use std::time::{Duration, Instant};
+use std::cell::RefCell;
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, BitBlt, CLEARTYPE_QUALITY, ClientToScreen, CreateCompatibleBitmap,
+    CreateCompatibleDC, CreateFontIndirectW, CreatePen, DC_BRUSH, DC_PEN, DEFAULT_CHARSET,
+    DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint,
+    GetStockObject, HDC, HFONT, InvalidateRect, LOGFONTW, LineTo, MoveToEx, NULL_BRUSH,
+    PAINTSTRUCT, PS_SOLID, Polyline, RoundRect, SRCCOPY, SelectObject, SetBkMode, SetDCBrushColor,
+    SetDCPenColor, SetTextColor, SetViewportOrgEx, TRANSPARENT,
+};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::{
+    ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, SetScrollInfo, TTF_SUBCLASS,
+    TTM_ADDTOOLW, TTM_DELTOOLW, TTM_SETMAXTIPWIDTH, TTTOOLINFOW, WM_MOUSELEAVE,
+};
+use windows::Win32::UI::HiDpi::{
+    AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem,
+    GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyNameTextW, GetKeyState, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL,
+    VK_ESCAPE, VK_MENU, VK_SHIFT,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW, GetScrollInfo, HICON, IDC_ARROW,
+    IDNO, IDOK, IDYES, IMAGE_ICON, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW,
+    MB_ICONWARNING, MB_OKCANCEL, MB_YESNOCANCEL, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    MINMAXINFO, MSG, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBTRACK, SB_TOP, SB_VERT,
+    SCROLLINFO, SIF_ALL, SIF_DISABLENOSCROLL, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON, SM_CXVSCROLL,
+    SM_CYICON, SM_CYSMICON, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetTimer,
+    SetWindowPos, ShowWindow, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN,
+    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER,
+    WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_VISIBLE, WS_VSCROLL,
+};
+use windows::core::{PCWSTR, PWSTR, w};
 
 /// Thread messages the tray app handles. Must match main.rs.
-pub const MSG_RELOAD: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 3;
-pub const MSG_SUSPEND: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 4;
+pub const MSG_RELOAD: u32 = WM_APP + 3;
+pub const MSG_SUSPEND: u32 = WM_APP + 4;
 
 const TWO_WINDOW_ACTIONS: [Action; 5] = [
     Action::TileWindows,
@@ -19,19 +62,44 @@ const TWO_WINDOW_ACTIONS: [Action; 5] = [
     Action::SwapWindows,
 ];
 
-const ONE_WINDOW_ACTIONS: [Action; 1] = [Action::MoveToNextMonitor];
-
-/// Collapsed-row columns. Every row is cut into the same rectangles, so label length never
-/// moves the shortcut field or the arrow.
+/// Collapsed-row columns, in 96-DPI pixels. Every row is cut into the same rectangles, so
+/// label length never moves the shortcut field or the arrow.
 const COL_PREVIEW: f32 = 60.0;
 const COL_NAME: f32 = 190.0;
 const COL_SHORTCUT: f32 = 200.0;
 const COL_ARROW: f32 = 28.0;
 const COL_GAP: f32 = 8.0;
 const ROW_H: f32 = 40.0;
+const PAD: f32 = 16.0;
+const FOOTER_H: f32 = 52.0;
+/// Width of the label column in an expanded row.
+const LABEL_W: f32 = 140.0;
 
-const ERROR: Color32 = Color32::from_rgb(220, 80, 80);
-const WARNING: Color32 = Color32::from_rgb(220, 160, 40);
+const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
+    COLORREF(r as u32 | (g as u32) << 8 | (b as u32) << 16)
+}
+
+const BG: COLORREF = rgb(250, 250, 250);
+const TEXT: COLORREF = rgb(27, 27, 27);
+const WEAK: COLORREF = rgb(96, 96, 96);
+const DISABLED: COLORREF = rgb(160, 160, 160);
+const BORDER: COLORREF = rgb(204, 204, 204);
+const BUTTON: COLORREF = rgb(240, 240, 240);
+const HOVER: COLORREF = rgb(232, 232, 232);
+const CHOSEN: COLORREF = rgb(214, 214, 214);
+const ACCENT: COLORREF = rgb(0, 103, 192);
+const ACCENT_HOVER: COLORREF = rgb(0, 88, 166);
+/// Accent at 35% over the background: the previous window in a placement icon.
+const ACCENT_LIGHT: COLORREF = rgb(163, 199, 231);
+const WHITE: COLORREF = rgb(255, 255, 255);
+const ERROR: COLORREF = rgb(196, 43, 28);
+const WARNING: COLORREF = rgb(157, 93, 0);
+
+/// Resource id of the app icon embedded by build.rs (assets/pane-pogo.rc).
+const APP_ICON_ID: usize = 1;
+
+const TIMER_TRAY: usize = 1;
+const TIMER_STATUS: usize = 2;
 
 pub fn action_label(a: Action) -> &'static str {
     match a {
@@ -85,6 +153,8 @@ const HELP_FOCUS: &str = "Which window you can type in after the shortcut runs."
 const HELP_MONITOR: &str =
     "The monitor the current window goes to. Secondary is your first non-primary monitor.";
 const HELP_SIDE: &str = "Which half of that monitor the current window fills.";
+const HELP_SHORTCUT: &str =
+    "Click, then press the keys. Use Ctrl, Alt or Shift with a letter, number or F1–F12.";
 
 // Full screen and half are stored as one action per monitor (and side). The drop-down picks the kind,
 // and the buttons below pick the monitor and side. This keeps existing bindings.json files valid.
@@ -141,19 +211,390 @@ fn picker_label(a: Action) -> &'static str {
         action_label(a)
     }
 }
-const HELP_SHORTCUT: &str =
-    "Click, then press the keys. Use Ctrl, Alt or Shift with a letter, number or F1–F12.";
 
-/// Settings shown under a two-window action. Swap has none.
-fn has_pair_settings(a: Action) -> bool {
-    a.is_pair()
-}
-
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Tab {
     All,
     One,
     Two,
+}
+
+/// A choice button in an expanded row.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum Pick {
+    /// Monitor of a full-screen or half action.
+    Monitor(MonitorRole),
+    /// Side of a half action.
+    Left(bool),
+    Order(Order),
+    PairMonitor(MonitorRole),
+    Focus(Focus),
+}
+
+/// What a click on a layout item does.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum Hit {
+    /// Not clickable; carries a tooltip only.
+    None,
+    Tab(Tab),
+    /// Expands or collapses a row.
+    Toggle(usize),
+    /// Starts recording a row's shortcut.
+    Shortcut(usize),
+    /// Opens the action drop-down of a row.
+    Picker(usize),
+    Pick(usize, Pick),
+    Remove(usize),
+    Add,
+    Discard,
+    Save,
+    OpenFile,
+    TryAgain,
+    StartFresh,
+}
+
+struct Item {
+    rect: RECT,
+    hit: Hit,
+    tip: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    /// The top-level window: header and footer.
+    Main = 0,
+    /// The scrolling child window with the shortcut rows.
+    List = 1,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Wins {
+    main: HWND,
+    list: HWND,
+    tip: HWND,
+}
+
+/// Fonts for one DPI, plus a memory DC used to measure text outside painting.
+struct Gfx {
+    dpi: u32,
+    dc: HDC,
+    normal: HFONT,
+    bold: HFONT,
+    heading: HFONT,
+}
+
+impl Gfx {
+    fn new(dpi: u32) -> Self {
+        let font = |points: i32, weight: i32| {
+            let mut lf = LOGFONTW {
+                lfHeight: -(points * dpi as i32 + 36) / 72,
+                lfWeight: weight,
+                lfCharSet: DEFAULT_CHARSET,
+                lfQuality: CLEARTYPE_QUALITY,
+                ..Default::default()
+            };
+            for (d, c) in lf.lfFaceName.iter_mut().zip("Segoe UI".encode_utf16()) {
+                *d = c;
+            }
+            unsafe { CreateFontIndirectW(&lf) }
+        };
+        Self {
+            dpi,
+            dc: unsafe { CreateCompatibleDC(None) },
+            normal: font(10, 400),
+            bold: font(10, 600),
+            heading: font(15, 600),
+        }
+    }
+
+    /// Scales 96-DPI pixels to this DPI.
+    fn s(&self, v: f32) -> i32 {
+        (v * self.dpi as f32 / 96.0).round() as i32
+    }
+}
+
+impl Drop for Gfx {
+    fn drop(&mut self) {
+        unsafe {
+            for f in [self.normal, self.bold, self.heading] {
+                let _ = DeleteObject(f.into());
+            }
+            let _ = DeleteDC(self.dc);
+        }
+    }
+}
+
+fn rect(x: i32, y: i32, w: i32, h: i32) -> RECT {
+    RECT {
+        left: x,
+        top: y,
+        right: x + w,
+        bottom: y + h,
+    }
+}
+
+fn contains(r: RECT, p: POINT) -> bool {
+    p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Style {
+    Normal,
+    Selected,
+    Accent,
+    /// Left-aligned text with a drop-down arrow.
+    Picker,
+}
+
+/// Lays out (and, when `paint` is set, draws) one pane, collecting the items under the mouse.
+struct Ui<'a> {
+    g: &'a Gfx,
+    dc: HDC,
+    paint: bool,
+    mouse: Option<POINT>,
+    items: Vec<Item>,
+}
+
+impl Ui<'_> {
+    fn s(&self, v: f32) -> i32 {
+        self.g.s(v)
+    }
+
+    fn item(&mut self, rect: RECT, hit: Hit, tip: Option<&'static str>) {
+        self.items.push(Item { rect, hit, tip });
+    }
+
+    fn hovered(&self, r: RECT) -> bool {
+        self.mouse.is_some_and(|p| contains(r, p))
+    }
+
+    fn fill(&self, r: RECT, c: COLORREF, radius: i32) {
+        if self.paint {
+            unsafe {
+                SetDCBrushColor(self.dc, c);
+                SetDCPenColor(self.dc, c);
+                let _ = RoundRect(
+                    self.dc,
+                    r.left,
+                    r.top,
+                    r.right,
+                    r.bottom,
+                    radius * 2,
+                    radius * 2,
+                );
+            }
+        }
+    }
+
+    fn frame(&self, r: RECT, c: COLORREF, radius: i32) {
+        if self.paint {
+            unsafe {
+                let old = SelectObject(self.dc, GetStockObject(NULL_BRUSH));
+                SetDCPenColor(self.dc, c);
+                let _ = RoundRect(
+                    self.dc,
+                    r.left,
+                    r.top,
+                    r.right,
+                    r.bottom,
+                    radius * 2,
+                    radius * 2,
+                );
+                SelectObject(self.dc, old);
+            }
+        }
+    }
+
+    fn line(&self, x0: i32, y0: i32, x1: i32, y1: i32, c: COLORREF) {
+        if self.paint {
+            unsafe {
+                SetDCPenColor(self.dc, c);
+                let _ = MoveToEx(self.dc, x0, y0, None);
+                let _ = LineTo(self.dc, x1, y1);
+            }
+        }
+    }
+
+    /// Chevron centred on (cx, cy): pointing down, or right when collapsed.
+    fn chevron(&self, cx: i32, cy: i32, down: bool, c: COLORREF) {
+        if !self.paint {
+            return;
+        }
+        let s = self.s(4.0);
+        let points = if down {
+            [
+                POINT {
+                    x: cx - s,
+                    y: cy - s / 2,
+                },
+                POINT {
+                    x: cx,
+                    y: cy + s / 2,
+                },
+                POINT {
+                    x: cx + s,
+                    y: cy - s / 2,
+                },
+            ]
+        } else {
+            [
+                POINT {
+                    x: cx - s / 2,
+                    y: cy - s,
+                },
+                POINT {
+                    x: cx + s / 2,
+                    y: cy,
+                },
+                POINT {
+                    x: cx - s / 2,
+                    y: cy + s,
+                },
+            ]
+        };
+        unsafe {
+            let pen = CreatePen(PS_SOLID, self.s(1.5).max(1), c);
+            let old = SelectObject(self.dc, pen.into());
+            let _ = Polyline(self.dc, &points);
+            SelectObject(self.dc, old);
+            let _ = DeleteObject(pen.into());
+        }
+    }
+
+    /// One line of text in `r`, cut with an ellipsis if too long.
+    fn text(&self, r: RECT, s: &str, font: HFONT, c: COLORREF, align: DRAW_TEXT_FORMAT) {
+        // DrawTextW faults on an empty buffer.
+        if self.paint && !s.is_empty() {
+            let mut buf: Vec<u16> = s.encode_utf16().collect();
+            let mut r = r;
+            unsafe {
+                SelectObject(self.dc, font.into());
+                SetTextColor(self.dc, c);
+                DrawTextW(
+                    self.dc,
+                    &mut buf,
+                    &mut r,
+                    align | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                );
+            }
+        }
+    }
+
+    fn measure(&self, s: &str, font: HFONT) -> i32 {
+        if s.is_empty() {
+            return 0;
+        }
+        let mut buf: Vec<u16> = s.encode_utf16().collect();
+        let mut r = RECT::default();
+        unsafe {
+            SelectObject(self.dc, font.into());
+            DrawTextW(
+                self.dc,
+                &mut buf,
+                &mut r,
+                DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
+        r.right - r.left
+    }
+
+    /// Word-wrapped text at (x, y), `w` wide. Returns its height.
+    fn wrap(&self, x: i32, y: i32, w: i32, s: &str, font: HFONT, c: COLORREF) -> i32 {
+        if s.is_empty() {
+            return 0;
+        }
+        let mut buf: Vec<u16> = s.encode_utf16().collect();
+        let mut r = rect(x, y, w.max(1), 0);
+        unsafe {
+            SelectObject(self.dc, font.into());
+            DrawTextW(
+                self.dc,
+                &mut buf,
+                &mut r,
+                DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+            );
+            if self.paint {
+                r.right = x + w.max(1);
+                SetTextColor(self.dc, c);
+                DrawTextW(self.dc, &mut buf, &mut r, DT_WORDBREAK | DT_NOPREFIX);
+            }
+        }
+        r.bottom - r.top
+    }
+
+    /// A button that is clickable only when `enabled`.
+    fn button(
+        &mut self,
+        r: RECT,
+        label: &str,
+        hit: Hit,
+        tip: Option<&'static str>,
+        style: Style,
+        enabled: bool,
+    ) {
+        let hover = enabled && self.hovered(r);
+        let radius = self.s(4.0);
+        let (bg, fg) = match (enabled, style) {
+            (false, Style::Accent) => (HOVER, DISABLED),
+            (false, _) => (BUTTON, DISABLED),
+            (true, Style::Accent) => (if hover { ACCENT_HOVER } else { ACCENT }, WHITE),
+            (true, Style::Selected) => (CHOSEN, TEXT),
+            (true, _) => (if hover { HOVER } else { BUTTON }, TEXT),
+        };
+        self.fill(r, bg, radius);
+        if style != Style::Accent {
+            self.frame(r, BORDER, radius);
+        }
+        let pad = self.s(8.0);
+        if style == Style::Picker {
+            let arrow = self.s(20.0);
+            let t = RECT {
+                left: r.left + pad,
+                right: r.right - arrow,
+                ..r
+            };
+            self.text(t, label, self.g.normal, fg, DT_LEFT);
+            self.chevron(
+                r.right - arrow / 2 - pad / 2,
+                (r.top + r.bottom) / 2,
+                true,
+                WEAK,
+            );
+        } else {
+            let t = RECT {
+                left: r.left + pad,
+                right: r.right - pad,
+                ..r
+            };
+            self.text(t, label, self.g.normal, fg, DT_CENTER);
+        }
+        if enabled {
+            self.item(r, hit, tip);
+        } else if tip.is_some() {
+            self.item(r, Hit::None, tip);
+        }
+    }
+
+    /// Button sized to its label. Returns its width.
+    #[allow(clippy::too_many_arguments)]
+    fn button_auto(
+        &mut self,
+        x: i32,
+        y: i32,
+        label: &str,
+        hit: Hit,
+        tip: Option<&'static str>,
+        style: Style,
+        enabled: bool,
+    ) -> i32 {
+        let w = self.measure(label, self.g.normal) + self.s(24.0);
+        self.button(rect(x, y, w, self.s(30.0)), label, hit, tip, style, enabled);
+        w
+    }
 }
 
 struct App {
@@ -167,41 +608,66 @@ struct App {
     /// Row whose shortcut is being recorded.
     recording: Option<usize>,
     record_hint: String,
-    /// When to re-read the status file after saving.
-    status_check_at: Option<Instant>,
-    confirm_close: bool,
     allow_close: bool,
+    /// True while the close prompt is open, so the tray check does not stack a second one.
+    prompting: bool,
     /// True once the tray app has been seen running. Used to detect that it exited.
     tray_seen: bool,
-    next_tray_check: Instant,
+    tray_running: bool,
     monitor_count: usize,
     /// Set when bindings.json could not be read. Saving is blocked so the file is
     /// never overwritten without the user choosing to.
     load_error: Option<String>,
+    wins: Wins,
+    gfx: Gfx,
+    /// Scroll offset of the list pane, in pixels.
+    scroll: i32,
+    /// Mouse position per pane, in client pixels. None when the mouse is outside.
+    mouse: [Option<POINT>; 2],
+    /// Index of the item under the mouse per pane, to repaint only when it changes.
+    hover: [Option<usize>; 2],
+    /// Number of tooltip tools registered per pane.
+    tools: [usize; 2],
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(gfx: Gfx) -> Self {
         let (bindings, load_error) = match config::load() {
             Ok(cfg) => (cfg.bindings, None),
             Err(e) => (Vec::new(), Some(e)),
         };
+        let running = app_running();
+        let mut app = Self::with_bindings(bindings, gfx);
+        app.load_error = load_error;
+        app.status = config::load_status();
+        app.tray_running = running;
+        app.tray_seen = running;
+        app.monitor_count = crate::win::monitors().len();
+        app
+    }
+
+    fn with_bindings(bindings: Vec<Binding>, gfx: Gfx) -> Self {
         Self {
             tab: Tab::All,
             expanded: None,
             saved: bindings.clone(),
             bindings,
-            status: config::load_status(),
+            status: config::Status::default(),
             message: String::new(),
-            load_error,
             recording: None,
             record_hint: String::new(),
-            status_check_at: None,
-            confirm_close: false,
             allow_close: false,
+            prompting: false,
             tray_seen: false,
-            next_tray_check: Instant::now(),
-            monitor_count: crate::win::monitors().len(),
+            tray_running: false,
+            monitor_count: 2,
+            load_error: None,
+            wins: Wins::default(),
+            gfx,
+            scroll: 0,
+            mouse: [None; 2],
+            hover: [None; 2],
+            tools: [0; 2],
         }
     }
 
@@ -237,7 +703,7 @@ impl App {
             .iter()
             .any(|s| s.shortcut.eq_ignore_ascii_case(&b.shortcut));
         if saved_unchanged
-            && app_running()
+            && self.tray_running
             && self
                 .status
                 .in_use
@@ -309,10 +775,15 @@ impl App {
         self.saved = self.bindings.clone();
         if notify_app(MSG_RELOAD) {
             self.message = "Saved. Your shortcuts are active now.".into();
-            self.status_check_at = Some(Instant::now() + Duration::from_millis(500));
+            self.check_status_soon();
         } else {
-            self.message = "Saved. Start pane-pogo to use them.".into();
+            self.message = "Saved. Start Pane Pogo to use them.".into();
         }
+    }
+
+    /// Re-reads the status file once the tray app has registered the shortcuts.
+    fn check_status_soon(&self) {
+        unsafe { SetTimer(Some(self.wins.main), TIMER_STATUS, 500, None) };
     }
 
     fn start_recording(&mut self, i: usize) {
@@ -324,80 +795,245 @@ impl App {
     fn stop_recording(&mut self) {
         if self.recording.take().is_some() {
             notify_app(MSG_RELOAD);
-            self.status_check_at = Some(Instant::now() + Duration::from_millis(500));
+            self.check_status_soon();
         }
     }
 
-    /// Reads key presses while a row is recording.
-    fn handle_recording(&mut self, ctx: &egui::Context) {
+    /// Handles a key press. Returns true if it was used to record a shortcut.
+    fn record_key(&mut self, vk: u32, lparam: LPARAM) -> bool {
         let Some(i) = self.recording else {
-            return;
+            return false;
         };
-        if !ctx.input(|inp| inp.viewport().focused.unwrap_or(true)) {
+        if vk == u32::from(VK_ESCAPE.0) {
             self.stop_recording();
-            return;
+            return true;
         }
-        let events = ctx.input(|inp| inp.events.clone());
-        for ev in events {
-            let egui::Event::Key {
-                key,
-                physical_key,
-                pressed: true,
-                modifiers,
-                ..
-            } = ev
-            else {
-                continue;
-            };
-            if key == egui::Key::Escape {
+        // Modifiers alone, including the Windows keys: wait for the main key.
+        if matches!(vk, 0x10..=0x12 | 0x5B | 0x5C | 0xA0..=0xA5) {
+            return true;
+        }
+        let down = |k: u16| unsafe { GetKeyState(i32::from(k)) } < 0;
+        let (ctrl, alt, shift) = (down(VK_CONTROL.0), down(VK_MENU.0), down(VK_SHIFT.0));
+        if !(ctrl || alt || shift) {
+            self.record_hint =
+                "Hold Ctrl, Alt or Shift, then press a letter, number or F1–F12.".into();
+            return true;
+        }
+        match recorded_shortcut(ctrl, alt, shift, vk) {
+            Some(text) => {
+                self.bindings[i].shortcut = text;
                 self.stop_recording();
+            }
+            None => {
+                let mut buf = [0u16; 64];
+                let n = unsafe { GetKeyNameTextW(lparam.0 as i32, &mut buf) };
+                let name = match n {
+                    1.. => String::from_utf16_lossy(&buf[..n as usize]),
+                    _ => "That key".into(),
+                };
+                self.record_hint = format!("{name} can't be used. Use a letter, number or F1–F12.");
+            }
+        }
+        true
+    }
+
+    /// Applies a click. The action drop-down is handled by `pick_action`.
+    fn apply(&mut self, hit: Hit) {
+        match hit {
+            Hit::None | Hit::Picker(_) => {}
+            Hit::Tab(t) => self.tab = t,
+            Hit::Toggle(i) => {
+                self.expanded = if self.expanded == Some(i) {
+                    None
+                } else {
+                    Some(i)
+                }
+            }
+            Hit::Shortcut(i) => {
+                if self.recording != Some(i) {
+                    self.start_recording(i);
+                }
+            }
+            Hit::Pick(i, p) => self.pick(i, p),
+            Hit::Remove(i) => {
+                if self.recording.is_some() {
+                    self.stop_recording();
+                }
+                self.bindings.remove(i);
+                self.expanded = match self.expanded {
+                    Some(e) if e == i => None,
+                    Some(e) if e > i => Some(e - 1),
+                    other => other,
+                };
+            }
+            Hit::Add => {
+                let action = if self.tab == Tab::Two {
+                    Action::TileWindows
+                } else {
+                    Action::TileLeft
+                };
+                self.bindings.push(Binding {
+                    shortcut: String::new(),
+                    action,
+                    pair: None,
+                });
+                let i = self.bindings.len() - 1;
+                self.expanded = Some(i);
+                self.start_recording(i);
+            }
+            Hit::Discard => {
+                self.stop_recording();
+                self.bindings = self.saved.clone();
+                self.message = "Changes undone.".into();
+            }
+            Hit::Save => self.save(),
+            Hit::OpenFile => {
+                if let Ok(p) = config::path() {
+                    let _ = std::process::Command::new("notepad.exe").arg(p).spawn();
+                }
+            }
+            Hit::TryAgain => self.reload_file(),
+            Hit::StartFresh => self.start_fresh(),
+        }
+    }
+
+    fn pick(&mut self, i: usize, pick: Pick) {
+        let b = &mut self.bindings[i];
+        let mut p = b.pair_settings();
+        match pick {
+            Pick::Monitor(m) => {
+                b.action = if is_full(b.action) {
+                    full_action(m)
+                } else {
+                    half_action(m, side_is_left(b.action))
+                };
                 return;
             }
-            if !(modifiers.ctrl || modifiers.alt || modifiers.shift) {
-                self.record_hint =
-                    "Hold Ctrl, Alt or Shift, then press a letter, number or F1–F12.".into();
-                continue;
+            Pick::Left(left) => {
+                b.action = half_action(monitor_of(b.action), left);
+                return;
             }
-            match recorded_shortcut(modifiers, key, physical_key) {
-                Ok(text) => {
-                    self.bindings[i].shortcut = text;
-                    self.stop_recording();
-                    return;
-                }
-                Err(name) => {
-                    self.record_hint =
-                        format!("{name} can't be used. Use a letter, number or F1–F12.");
-                }
-            }
+            Pick::Order(o) => p.order = o,
+            Pick::PairMonitor(m) => p.monitor = m,
+            Pick::Focus(f) => p.focus = f,
         }
+        // Write only on a real change: a row saved without `pair` uses the action's
+        // default, and storing that default would mark it unsaved.
+        if p != b.pair_settings() {
+            b.pair = Some(p);
+        }
+    }
+
+    /// Applies a command from the action drop-down (see `pick_action`).
+    fn set_action(&mut self, i: usize, cmd: usize) {
+        let b = &mut self.bindings[i];
+        b.action = match cmd {
+            MENU_FULL if is_full(b.action) => return,
+            MENU_FULL => Action::FullPrimary,
+            MENU_HALF if is_half(b.action) => return,
+            MENU_HALF => Action::TileLeft,
+            MENU_NEXT => Action::MoveToNextMonitor,
+            c if (MENU_TWO..MENU_TWO + TWO_WINDOW_ACTIONS.len()).contains(&c) => {
+                TWO_WINDOW_ACTIONS[c - MENU_TWO]
+            }
+            _ => return,
+        };
+        if !b.action.is_pair() {
+            b.pair = None;
+        }
+    }
+
+    fn mouse_in(&self, pane: Pane) -> Option<POINT> {
+        let p = self.mouse[pane as usize]?;
+        Some(match pane {
+            Pane::Main => p,
+            Pane::List => POINT {
+                x: p.x,
+                y: p.y + self.scroll,
+            },
+        })
+    }
+
+    /// Lays out a pane `w` by `h` pixels. Returns its items (list items in content
+    /// coordinates) and the header height (main) or content height (list).
+    fn layout(&self, pane: Pane, dc: HDC, paint: bool, w: i32, h: i32) -> (Vec<Item>, i32) {
+        let mut ui = Ui {
+            g: &self.gfx,
+            dc,
+            paint,
+            mouse: self.mouse_in(pane),
+            items: Vec::new(),
+        };
+        let height = match pane {
+            Pane::Main => {
+                let header = header(self, &mut ui, w);
+                if self.load_error.is_none() {
+                    let top = h - ui.s(FOOTER_H);
+                    footer(self, &mut ui, top, w);
+                }
+                header
+            }
+            Pane::List => list(self, &mut ui, w),
+        };
+        (ui.items, height)
+    }
+
+    fn client(&self, pane: Pane) -> (i32, i32) {
+        let hwnd = match pane {
+            Pane::Main => self.wins.main,
+            Pane::List => self.wins.list,
+        };
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(hwnd, &mut r);
+        }
+        (r.right, r.bottom)
+    }
+
+    /// Topmost item under a client point of a pane, with its index and client rect.
+    fn item_at(&self, pane: Pane, pt: POINT) -> Option<(usize, Hit, RECT)> {
+        let (w, h) = self.client(pane);
+        let (items, _) = self.layout(pane, self.gfx.dc, false, w, h);
+        let dy = if pane == Pane::List { self.scroll } else { 0 };
+        let p = POINT {
+            x: pt.x,
+            y: pt.y + dy,
+        };
+        items
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, it)| contains(it.rect, p))
+            .map(|(n, it)| {
+                let mut r = it.rect;
+                r.top -= dy;
+                r.bottom -= dy;
+                (n, it.hit, r)
+            })
     }
 }
 
-/// Builds the shortcut text for a recorded key press. Tries the key egui names first, which
-/// follows the keyboard layout, then the physical key. Shift+1 on a US layout arrives as `!`
-/// (`Key::Exclamationmark`), so the physical key turns it back into `1`.
-/// Returns the named key's name when neither makes a valid shortcut.
-fn recorded_shortcut(
-    modifiers: egui::Modifiers,
-    key: egui::Key,
-    physical_key: Option<egui::Key>,
-) -> Result<String, &'static str> {
+/// Builds the shortcut text for a recorded key press. Virtual-key codes name the key, not the
+/// character, so Shift+1 records as `1` on any layout. Returns None for keys that cannot be used.
+fn recorded_shortcut(ctrl: bool, alt: bool, shift: bool, vk: u32) -> Option<String> {
+    let key = match vk {
+        0x30..=0x39 | 0x41..=0x5A => char::from_u32(vk)?.to_string(),
+        0x70..=0x7B => format!("F{}", vk - 0x6F),
+        _ => return None,
+    };
     let mut parts = Vec::new();
-    if modifiers.ctrl {
+    if ctrl {
         parts.push("Ctrl");
     }
-    if modifiers.alt {
+    if alt {
         parts.push("Alt");
     }
-    if modifiers.shift {
+    if shift {
         parts.push("Shift");
     }
-    let prefix = parts.join("+");
-    std::iter::once(key)
-        .chain(physical_key)
-        .map(|k| format!("{prefix}+{}", k.name()))
-        .find(|text| hotkeys::parse(text).is_ok())
-        .ok_or(key.name())
+    parts.push(&key);
+    let text = parts.join("+");
+    hotkeys::parse(&text).is_ok().then_some(text)
 }
 
 impl Drop for App {
@@ -421,11 +1057,7 @@ fn needs_secondary(b: &Binding) -> bool {
 
 fn tray_thread() -> Option<u32> {
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId};
-    use windows::core::PCWSTR;
-    let class: Vec<u16> = "PanePogoTray"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let class = wide("PanePogoTray");
     unsafe {
         let hwnd = FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()).ok()?;
         if hwnd.0.is_null() {
@@ -441,7 +1073,6 @@ pub fn app_running() -> bool {
 
 /// Posts a thread message to the running tray app. Returns false if it is not running.
 fn notify_app(msg: u32) -> bool {
-    use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
     match tray_thread() {
         Some(tid) => unsafe { PostThreadMessageW(tid, msg, WPARAM(0), LPARAM(0)).is_ok() },
@@ -480,157 +1111,30 @@ fn placement_regions(b: &Binding) -> Vec<(usize, f32, f32, bool)> {
     }
 }
 
-/// What one collapsed row reports back. The rects are where the shortcut field and arrow landed.
-struct RowOutput {
-    /// The whole row; a click outside the shortcut field toggles the settings.
-    row: egui::Response,
-    shortcut: egui::Response,
-    /// The expand/collapse control.
-    arrow: egui::Response,
-}
-
-/// Runs `add` inside `rect`, left-aligned and vertically centred.
-fn in_rect<R>(ui: &mut egui::Ui, rect: egui::Rect, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        add,
-    )
-    .inner
-}
-
-/// Draws one collapsed shortcut row: preview | name and monitor | shortcut | arrow.
-/// The row is allocated once at a fixed width, then cut into fixed column rects. Settings,
-/// recording hints and errors are drawn below the row by the caller.
-fn shortcut_row(ui: &mut egui::Ui, b: &Binding, expanded: bool, recording: bool) -> RowOutput {
-    let widths = [COL_PREVIEW, COL_NAME, COL_SHORTCUT, COL_ARROW];
-    let total = widths.iter().sum::<f32>() + COL_GAP * (widths.len() - 1) as f32;
-    // Allocated before its contents, so the shortcut button sits on top and keeps its own
-    // clicks. A click anywhere else on the row toggles the settings.
-    let (row, row_resp) = ui.allocate_exact_size(egui::vec2(total, ROW_H), egui::Sense::click());
-    if row_resp.hovered() {
-        ui.painter()
-            .rect_filled(row, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
-    }
-    let mut x = row.min.x;
-    let [preview, name, shortcut_col, arrow_col] = widths.map(|w| {
-        let r = egui::Rect::from_min_size(egui::pos2(x, row.min.y), egui::vec2(w, ROW_H));
-        x += w + COL_GAP;
-        r
-    });
-
-    placement_icon(
-        ui,
-        egui::Rect::from_center_size(preview.center(), egui::vec2(56.0, 34.0)),
-        b,
-    );
-
-    let title = egui::Label::new(RichText::new(picker_label(b.action)).strong())
-        .truncate()
-        .selectable(false);
-    match monitor_text(b) {
-        Some(m) => {
-            let half = egui::vec2(name.width(), ROW_H / 2.0);
-            in_rect(ui, egui::Rect::from_min_size(name.min, half), |ui| {
-                ui.add(title)
-            });
-            let sub = egui::Label::new(RichText::new(m).weak())
-                .truncate()
-                .selectable(false);
-            let low = egui::pos2(name.min.x, name.min.y + ROW_H / 2.0);
-            in_rect(ui, egui::Rect::from_min_size(low, half), |ui| ui.add(sub));
-        }
-        None => {
-            in_rect(ui, name, |ui| ui.add(title));
-        }
-    }
-
-    let text = if recording {
-        "Press keys…  (Esc to cancel)".to_string()
-    } else if b.shortcut.is_empty() {
-        "Click to set".to_string()
-    } else {
-        b.shortcut.clone()
-    };
-    let field = egui::Rect::from_center_size(shortcut_col.center(), egui::vec2(COL_SHORTCUT, 28.0));
-    let resp = ui
-        .put(
-            field,
-            egui::Button::new(text).selected(recording).truncate(),
-        )
-        .on_hover_text(HELP_SHORTCUT);
-
-    // Expand/collapse chevron, painted as lines: a text glyph like "▶" falls back to the
-    // coloured emoji font.
-    let arrow_rect = egui::Rect::from_center_size(arrow_col.center(), egui::vec2(COL_ARROW, 28.0));
-    let arrow_resp = ui.interact(arrow_rect, row_resp.id.with("arrow"), egui::Sense::click());
-    let c = arrow_rect.center();
-    let s = 4.0;
-    let points = if expanded {
-        vec![
-            c + egui::vec2(-s, -s / 2.0),
-            c + egui::vec2(0.0, s / 2.0),
-            c + egui::vec2(s, -s / 2.0),
-        ]
-    } else {
-        vec![
-            c + egui::vec2(-s / 2.0, -s),
-            c + egui::vec2(s / 2.0, 0.0),
-            c + egui::vec2(-s / 2.0, s),
-        ]
-    };
-    let color = if arrow_resp.hovered() || row_resp.hovered() {
-        ui.visuals().strong_text_color()
-    } else {
-        ui.visuals().weak_text_color()
-    };
-    ui.painter().line(points, egui::Stroke::new(1.5, color));
-
-    RowOutput {
-        row: row_resp,
-        shortcut: resp,
-        arrow: arrow_resp,
-    }
-}
-
-/// Small monitor diagram, so the user sees where the window goes. Paints into `rect`.
-fn placement_icon(ui: &egui::Ui, rect: egui::Rect, b: &Binding) {
-    let painter = ui.painter_at(rect);
-    let gap = 3.0;
-    let primary_w = (rect.width() - gap) * 0.6;
-    let secondary_w = rect.width() - gap - primary_w;
+/// Small monitor diagram, so the user sees where the window goes.
+fn placement_icon(ui: &Ui, r: RECT, b: &Binding) {
+    let gap = ui.s(3.0);
+    let w = r.right - r.left;
+    let h = r.bottom - r.top;
+    let primary_w = (w - gap) * 3 / 5;
     let monitors = [
-        egui::Rect::from_min_size(rect.min, egui::vec2(primary_w, rect.height())),
-        egui::Rect::from_min_size(
-            egui::pos2(rect.min.x + primary_w + gap, rect.min.y),
-            egui::vec2(secondary_w, rect.height()),
-        ),
+        rect(r.left, r.top, primary_w, h),
+        rect(r.left + primary_w + gap, r.top, w - gap - primary_w, h),
     ];
-    let visuals = ui.visuals();
-    let outline = visuals.weak_text_color();
-    let fill = visuals.selection.bg_fill;
     for m in monitors {
-        painter.rect_stroke(
-            m,
-            2.0,
-            egui::Stroke::new(1.0, outline),
-            egui::StrokeKind::Inside,
-        );
+        ui.frame(m, WEAK, ui.s(2.0));
     }
+    let inset = ui.s(2.0);
     for (m, x0, x1, current) in placement_regions(b) {
         let mon = monitors[m];
-        let r = egui::Rect::from_min_max(
-            egui::pos2(mon.min.x + mon.width() * x0, mon.min.y),
-            egui::pos2(mon.min.x + mon.width() * x1, mon.max.y),
-        )
-        .shrink(1.5);
-        let color = if current {
-            fill
-        } else {
-            fill.linear_multiply(0.35)
+        let mw = (mon.right - mon.left) as f32;
+        let region = RECT {
+            left: mon.left + (mw * x0).round() as i32 + inset,
+            right: mon.left + (mw * x1).round() as i32 - inset,
+            top: mon.top + inset,
+            bottom: mon.bottom - inset,
         };
-        painter.rect_filled(r, 1.0, color);
+        ui.fill(region, if current { ACCENT } else { ACCENT_LIGHT }, 1);
     }
 }
 
@@ -651,376 +1155,1097 @@ fn monitor_text(b: &Binding) -> Option<&'static str> {
     })
 }
 
-/// Two-option segmented control. The chosen option gets a neutral fill, not the selection blue.
-fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: [(T, &str); 2]) {
-    let stroke = ui.visuals().widgets.inactive.bg_stroke;
-    let chosen = ui.visuals().widgets.active.bg_fill;
-    egui::Frame::new()
-        .stroke(stroke)
-        .corner_radius(4)
-        .inner_margin(egui::Margin::same(2))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.horizontal(|ui| {
-                for (v, label) in options {
-                    let fill = if *value == v {
-                        chosen
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    if ui
-                        .add(egui::Button::new(label).fill(fill).corner_radius(3))
-                        .clicked()
-                    {
-                        *value = v;
-                    }
-                }
-            });
-        });
-}
+/// Title, intro, file error or warning, and tabs. Returns the height used.
+fn header(app: &App, ui: &mut Ui, w: i32) -> i32 {
+    let g = ui.g;
+    let pad = ui.s(PAD);
+    let tw = w - 2 * pad;
+    let mut y = pad;
+    y += ui.wrap(pad, y, tw, "Pane Pogo shortcuts", g.heading, TEXT) + ui.s(6.0);
+    y += ui.wrap(
+        pad,
+        y,
+        tw,
+        "The current window is the one you are using when you press a shortcut. \
+         The previous window is the one you used just before it.",
+        g.normal,
+        TEXT,
+    ) + ui.s(10.0);
 
-impl eframe::App for App {
-    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = root.ctx().clone();
-        self.handle_recording(&ctx);
-
-        if let Some(at) = self.status_check_at {
-            if Instant::now() >= at {
-                self.status = config::load_status();
-                self.status_check_at = None;
-            } else {
-                ctx.request_repaint_after(at - Instant::now());
-            }
-        }
-
-        // Close when the tray app exits. Settings is its own process, so it only learns this by polling.
-        // Only a tray app seen running counts, so a standalone Settings window stays open.
-        let now = Instant::now();
-        if now >= self.next_tray_check {
-            self.next_tray_check = now + Duration::from_secs(1);
-            if app_running() {
-                self.tray_seen = true;
-            } else if self.tray_seen {
-                self.tray_seen = false;
-                if self.dirty() {
-                    self.confirm_close = true;
-                } else {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-        }
-        ctx.request_repaint_after(self.next_tray_check.saturating_duration_since(now));
-
-        if ctx.input(|i| i.viewport().close_requested()) && self.dirty() && !self.allow_close {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.confirm_close = true;
-        }
-
-        egui::CentralPanel::default().show(root, |ui| {
-            ui.heading("pane-pogo shortcuts");
-            ui.label(
-                "The current window is the one you are using when you press a shortcut. \
-                 The previous window is the one you used just before it.",
-            );
-            if let Some(err) = self.load_error.clone() {
-                ui.add_space(4.0);
-                ui.group(|ui| {
-                    ui.label(RichText::new("Your shortcuts file could not be read, so no shortcuts are active.").color(ERROR).strong());
-                    ui.label(RichText::new(err).weak());
-                    ui.horizontal(|ui| {
-                        if ui.button("Open file").on_hover_text("Opens bindings.json in Notepad so you can fix it.").clicked()
-                            && let Ok(p) = config::path()
-                        {
-                            let _ = std::process::Command::new("notepad.exe").arg(p).spawn();
-                        }
-                        if ui.button("Try again").on_hover_text("Reads the file again after you fix it.").clicked() {
-                            self.reload_file();
-                        }
-                        if ui.button("Start fresh").on_hover_text("Keeps the broken file as bindings.broken.json and starts from the default shortcuts.").clicked() {
-                            self.start_fresh();
-                        }
-                    });
-                });
-                ui.add_space(8.0);
-                return;
-            }
-            if !app_running() {
-                ui.add_space(4.0);
-                ui.label(RichText::new("pane-pogo is not running, so shortcuts do nothing yet. Run pane-pogo.exe to start it.").color(WARNING));
-            }
-            ui.add_space(8.0);
-
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::All, "All");
-                ui.selectable_value(&mut self.tab, Tab::One, "One window");
-                ui.selectable_value(&mut self.tab, Tab::Two, "Two windows");
-            });
-            ui.add_space(4.0);
-            let list_height = (ui.available_height() - 60.0).max(100.0);
-            let mut remove = None;
-            let mut record = None;
-            let mut toggle = None;
-            egui::ScrollArea::vertical().max_height(list_height).auto_shrink([false, false]).show(ui, |ui| {
-                if self.bindings.is_empty() {
-                    ui.label("No shortcuts yet. Click “Add shortcut” to create one.");
-                }
-                let tab = self.tab;
-                let rows: Vec<usize> = (0..self.bindings.len())
-                    .filter(|&i| match tab {
-                        Tab::All => true,
-                        Tab::One => !self.bindings[i].action.is_pair(),
-                        Tab::Two => self.bindings[i].action.is_pair(),
-                    })
-                    .collect();
-                if rows.is_empty() {
-                    ui.label(match tab {
-                        Tab::All => "No shortcuts yet. Click “Add shortcut” to create one.",
-                        Tab::One => "No one-window shortcuts yet.",
-                        Tab::Two => "No two-window shortcuts yet.",
-                    });
-                }
-                for i in rows {
-                    let blocking = self.blocking_problem(i);
-                    let warning = self.warning(i);
-                    let recording = self.recording == Some(i);
-                    let b = &mut self.bindings[i];
-
-                    let out = shortcut_row(ui, b, self.expanded == Some(i), recording);
-                    if out.shortcut.clicked() && !recording {
-                        record = Some(i);
-                    }
-                    if out.row.clicked() || out.arrow.clicked() {
-                        toggle = Some(i);
-                    }
-                    if recording && !self.record_hint.is_empty() {
-                        ui.label(RichText::new(&self.record_hint).color(WARNING));
-                    }
-                    if let Some(p) = &blocking {
-                        ui.label(RichText::new(p).color(ERROR));
-                    } else if let Some(w) = &warning {
-                        ui.label(RichText::new(w).color(WARNING));
-                    }
-
-                    if self.expanded == Some(i) {
-                        ui.indent(("body", i), |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Action:").on_hover_text(action_help(b.action));
-                            egui::ComboBox::from_id_salt(("action", i))
-                                .selected_text(picker_label(b.action))
-                                .width(270.0)
-                                .show_ui(ui, |ui| {
-                                    ui.label(RichText::new("One window").weak());
-                                    let full = is_full(b.action);
-                                    if ui.selectable_label(full, "Full screen on one monitor").on_hover_text(action_help(Action::FullPrimary)).clicked() && !full {
-                                        b.action = Action::FullPrimary;
-                                    }
-                                    let half = is_half(b.action);
-                                    if ui.selectable_label(half, "Half of one monitor").on_hover_text(action_help(Action::TileLeft)).clicked() && !half {
-                                        b.action = Action::TileLeft;
-                                    }
-                                    for a in ONE_WINDOW_ACTIONS {
-                                        ui.selectable_value(&mut b.action, a, action_label(a)).on_hover_text(action_help(a));
-                                    }
-                                    ui.separator();
-                                    ui.label(RichText::new("Two windows").weak());
-                                    for a in TWO_WINDOW_ACTIONS {
-                                        ui.selectable_value(&mut b.action, a, action_label(a)).on_hover_text(action_help(a));
-                                    }
-                                });
-                        });
-
-                        if is_full(b.action) || is_half(b.action) {
-                            let full = is_full(b.action);
-                            let mut monitor = monitor_of(b.action);
-                            let mut left = side_is_left(b.action);
-                            egui::Grid::new(("single", i)).num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-                                ui.label("Monitor:").on_hover_text(HELP_MONITOR);
-                                ui.horizontal(|ui| {
-                                    choice(ui, &mut monitor, [
-                                        (MonitorRole::Primary, "Primary monitor"),
-                                        (MonitorRole::Secondary, "Secondary monitor"),
-                                    ]);
-                                });
-                                ui.end_row();
-                                if !full {
-                                    ui.label("Side:").on_hover_text(HELP_SIDE);
-                                    ui.horizontal(|ui| {
-                                        choice(ui, &mut left, [(true, "Left half"), (false, "Right half")]);
-                                    });
-                                    ui.end_row();
-                                }
-                            });
-                            b.action = if full {
-                                full_action(monitor)
-                            } else {
-                                half_action(monitor, left)
-                            };
-                        }
-
-                        if has_pair_settings(b.action) {
-                            let mut p: PairSettings = b.pair_settings();
-                            egui::Grid::new(("pair", i)).num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-                                let split = matches!(b.action.layout(), Layout::Split { .. });
-                                if split {
-                                    ui.label("Current window on:").on_hover_text(HELP_ORDER);
-                                    ui.horizontal(|ui| {
-                                        choice(ui, &mut p.order, [(Order::CurrentLeft, "Left"), (Order::CurrentRight, "Right")]);
-                                    });
-                                    ui.end_row();
-                                    ui.label("Monitor:").on_hover_text(HELP_TILE_ON);
-                                } else {
-                                    ui.label("Current window on:").on_hover_text(HELP_GOES_TO);
-                                }
-                                ui.horizontal(|ui| {
-                                    choice(ui, &mut p.monitor, [
-                                        (MonitorRole::Primary, "Primary monitor"),
-                                        (MonitorRole::Secondary, "Secondary monitor"),
-                                    ]);
-                                });
-                                ui.end_row();
-                                ui.label("Final focus:").on_hover_text(HELP_FOCUS);
-                                ui.horizontal(|ui| {
-                                    choice(ui, &mut p.focus, [
-                                        (Focus::Current, "Current window"),
-                                        (Focus::Previous, "Previous window"),
-                                    ]);
-                                });
-                                ui.end_row();
-                            });
-                            // Write only on a real change: a row saved without `pair` uses the
-                            // action's default, and storing that default would mark it unsaved.
-                            if p != b.pair_settings() {
-                                b.pair = Some(p);
-                            }
-                        } else {
-                            b.pair = None;
-                        }
-
-                        ui.horizontal(|ui| {
-                            if ui.button("Remove").clicked() {
-                                remove = Some(i);
-                            }
-                        });
-                        });
-                    }
-                    ui.separator();
-                }
-            });
-
-            if let Some(i) = toggle {
-                self.expanded = if self.expanded == Some(i) { None } else { Some(i) };
-                // The rows were already drawn this frame; draw again so the change shows now.
-                ui.ctx().request_repaint();
-            }
-            if let Some(i) = remove {
-                if self.recording.is_some() {
-                    self.stop_recording();
-                }
-                self.bindings.remove(i);
-                self.expanded = match self.expanded {
-                    Some(e) if e == i => None,
-                    Some(e) if e > i => Some(e - 1),
-                    other => other,
-                };
-            }
-            if let Some(i) = record {
-                self.start_recording(i);
-            }
-
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("➕ Add shortcut").clicked() {
-                    let action = if self.tab == Tab::Two { Action::TileWindows } else { Action::TileLeft };
-                    self.bindings.push(Binding { shortcut: String::new(), action, pair: None });
-                    let i = self.bindings.len() - 1;
-                    self.expanded = Some(i);
-                    self.start_recording(i);
-                }
-                // Right to left: Save is the primary action, Discard sits beside it,
-                // and the status reads next to them.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let can_save = self.dirty() && !self.any_blocking();
-                    let accent = ui.visuals().selection.bg_fill;
-                    let save = egui::Button::new(RichText::new("Save changes").color(Color32::WHITE)).fill(accent);
-                    if ui.add_enabled(can_save, save).clicked() {
-                        self.save();
-                    }
-                    if ui.add_enabled(self.dirty(), egui::Button::new("Discard changes")).clicked() {
-                        self.stop_recording();
-                        self.bindings = self.saved.clone();
-                        self.message = "Changes undone.".into();
-                    }
-                    if self.dirty() {
-                        let blocked = (0..self.bindings.len()).filter(|&i| self.blocking_problem(i).is_some()).count();
-                        if blocked == 0 {
-                            ui.label(RichText::new("Unsaved changes").color(WARNING));
-                        } else if blocked == 1 {
-                            ui.label(RichText::new("1 row needs fixing before you can save.").color(ERROR));
-                        } else {
-                            ui.label(RichText::new(format!("{blocked} rows need fixing before you can save.")).color(ERROR));
-                        }
-                    } else {
-                        ui.label(&self.message);
-                    }
-                });
-            });
-        });
-
-        if self.confirm_close {
-            egui::Modal::new(egui::Id::unique("confirm_close")).show(&ctx, |ui| {
-                ui.label("You have unsaved changes.");
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.any_blocking(), egui::Button::new("Save and close"))
-                        .clicked()
-                    {
-                        self.save();
-                        self.allow_close = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    if ui.button("Close without saving").clicked() {
-                        self.allow_close = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    if ui.button("Keep editing").clicked() {
-                        self.confirm_close = false;
-                    }
-                });
-            });
-        }
-    }
-}
-
-pub fn run() -> eframe::Result {
-    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
-
-    // Intel UHD 620 Vulkan driver (igvk64.dll) crashes in vkCreateDescriptorPool, so skip
-    // Vulkan and use DirectX 12, with OpenGL as fallback. WGPU_BACKEND still overrides this.
-    let mut create_new = WgpuSetupCreateNew::without_display_handle();
-    if std::env::var_os("WGPU_BACKEND").is_none() {
-        create_new.instance_descriptor.backends =
-            eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::GL;
-    }
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("pane-pogo shortcuts")
-            .with_inner_size([860.0, 600.0])
-            .with_min_inner_size([700.0, 400.0])
-            .with_icon(
-                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-64.png"))
-                    .expect("assets/icon-64.png is a valid PNG"),
+    if let Some(err) = &app.load_error {
+        let top = y;
+        let x = pad + ui.s(12.0);
+        let iw = tw - ui.s(24.0);
+        y += ui.s(10.0);
+        y += ui.wrap(
+            x,
+            y,
+            iw,
+            "Your shortcuts file could not be read, so no shortcuts are active.",
+            g.bold,
+            ERROR,
+        ) + ui.s(4.0);
+        y += ui.wrap(x, y, iw, err, g.normal, WEAK) + ui.s(10.0);
+        let mut bx = x;
+        for (label, hit, tip) in [
+            (
+                "Open file",
+                Hit::OpenFile,
+                "Opens bindings.json in Notepad so you can fix it.",
             ),
-        wgpu_options: WgpuConfiguration {
-            wgpu_setup: WgpuSetup::CreateNew(create_new),
-            ..Default::default()
-        },
+            (
+                "Try again",
+                Hit::TryAgain,
+                "Reads the file again after you fix it.",
+            ),
+            (
+                "Start fresh",
+                Hit::StartFresh,
+                "Keeps the broken file as bindings.broken.json and starts from the default shortcuts.",
+            ),
+        ] {
+            bx += ui.button_auto(bx, y, label, hit, Some(tip), Style::Normal, true) + ui.s(8.0);
+        }
+        y += ui.s(30.0) + ui.s(10.0);
+        ui.frame(rect(pad, top, tw, y - top), BORDER, ui.s(4.0));
+        if !app.message.is_empty() {
+            y += ui.s(8.0);
+            y += ui.wrap(pad, y, tw, &app.message, g.normal, TEXT);
+        }
+        return y + ui.s(8.0);
+    }
+
+    if !app.tray_running {
+        y += ui.wrap(
+            pad,
+            y,
+            tw,
+            "Pane Pogo is not running, so shortcuts do nothing yet. Run pane-pogo.exe to start it.",
+            g.normal,
+            WARNING,
+        ) + ui.s(8.0);
+    }
+    let mut x = pad;
+    for (tab, label) in [
+        (Tab::All, "All"),
+        (Tab::One, "One window"),
+        (Tab::Two, "Two windows"),
+    ] {
+        let style = if app.tab == tab {
+            Style::Selected
+        } else {
+            Style::Normal
+        };
+        x += ui.button_auto(x, y, label, Hit::Tab(tab), None, style, true) + ui.s(4.0);
+    }
+    y += ui.s(30.0) + ui.s(8.0);
+    ui.line(pad, y, w - pad, y, BORDER);
+    y + 1
+}
+
+/// Add, status, Discard and Save, along the bottom edge from `top`.
+fn footer(app: &App, ui: &mut Ui, top: i32, w: i32) {
+    let pad = ui.s(PAD);
+    ui.line(pad, top, w - pad, top, BORDER);
+    let bh = ui.s(30.0);
+    let y = top + (ui.s(FOOTER_H) - bh) / 2;
+    let add_w = ui.button_auto(
+        pad,
+        y,
+        "+  Add shortcut",
+        Hit::Add,
+        None,
+        Style::Normal,
+        true,
+    );
+
+    // Right to left: Save is the primary action, Discard sits beside it, and the
+    // status reads next to them.
+    let dirty = app.dirty();
+    let can_save = dirty && !app.any_blocking();
+    let mut x = w - pad;
+    let save_w = ui.measure("Save changes", ui.g.normal) + ui.s(24.0);
+    x -= save_w;
+    ui.button_auto(
+        x,
+        y,
+        "Save changes",
+        Hit::Save,
+        None,
+        Style::Accent,
+        can_save,
+    );
+    let discard_w = ui.measure("Discard changes", ui.g.normal) + ui.s(24.0);
+    x -= ui.s(8.0) + discard_w;
+    ui.button_auto(
+        x,
+        y,
+        "Discard changes",
+        Hit::Discard,
+        None,
+        Style::Normal,
+        dirty,
+    );
+
+    let (text, color) = if dirty {
+        match (0..app.bindings.len())
+            .filter(|&i| app.blocking_problem(i).is_some())
+            .count()
+        {
+            0 => ("Unsaved changes".to_string(), WARNING),
+            1 => ("1 row needs fixing before you can save.".to_string(), ERROR),
+            n => (format!("{n} rows need fixing before you can save."), ERROR),
+        }
+    } else {
+        (app.message.clone(), TEXT)
+    };
+    let left = pad + add_w + ui.s(12.0);
+    let status = RECT {
+        left,
+        top: y,
+        right: (x - ui.s(12.0)).max(left),
+        bottom: y + bh,
+    };
+    ui.text(status, &text, ui.g.normal, color, DT_RIGHT);
+}
+
+/// The shortcut rows. Returns the content height.
+fn list(app: &App, ui: &mut Ui, w: i32) -> i32 {
+    let g = ui.g;
+    let pad = ui.s(PAD);
+    let mut y = ui.s(6.0);
+    let tab = app.tab;
+    let rows: Vec<usize> = (0..app.bindings.len())
+        .filter(|&i| match tab {
+            Tab::All => true,
+            Tab::One => !app.bindings[i].action.is_pair(),
+            Tab::Two => app.bindings[i].action.is_pair(),
+        })
+        .collect();
+    if rows.is_empty() {
+        let text = match tab {
+            Tab::All => "No shortcuts yet. Click “Add shortcut” to create one.",
+            Tab::One => "No one-window shortcuts yet.",
+            Tab::Two => "No two-window shortcuts yet.",
+        };
+        y += ui.wrap(pad, y, w - 2 * pad, text, g.normal, TEXT) + ui.s(8.0);
+    }
+    for i in rows {
+        y = row(app, ui, i, y, w);
+    }
+    y + ui.s(8.0)
+}
+
+/// One shortcut row: preview | name and monitor | shortcut | arrow, then its messages and,
+/// when expanded, its settings. Returns the y below it.
+fn row(app: &App, ui: &mut Ui, i: usize, mut y: i32, w: i32) -> i32 {
+    let g = ui.g;
+    let b = &app.bindings[i];
+    let expanded = app.expanded == Some(i);
+    let recording = app.recording == Some(i);
+    let pad = ui.s(PAD);
+    let gap = ui.s(COL_GAP);
+    let row_h = ui.s(ROW_H);
+    // The name column takes the width the fixed columns leave, so titles are cut only when the
+    // window is narrower than the minimum.
+    let fixed = ui.s(COL_PREVIEW) + ui.s(COL_SHORTCUT) + ui.s(COL_ARROW) + gap * 3;
+    let name_w = (w - 2 * pad - fixed).max(ui.s(COL_NAME));
+    let widths = [
+        ui.s(COL_PREVIEW),
+        name_w,
+        ui.s(COL_SHORTCUT),
+        ui.s(COL_ARROW),
+    ];
+    let total = widths.iter().sum::<i32>() + gap * 3;
+
+    // Pushed before its contents, so the shortcut field sits on top and keeps its own
+    // clicks. A click anywhere else on the row toggles the settings.
+    let row = rect(pad, y, total, row_h);
+    ui.item(row, Hit::Toggle(i), None);
+    let row_hover = ui.hovered(row);
+    if row_hover {
+        ui.fill(row, HOVER, ui.s(4.0));
+    }
+    let mut x = pad;
+    let [preview, name, shortcut_col, arrow_col] = widths.map(|cw| {
+        let r = rect(x, y, cw, row_h);
+        x += cw + gap;
+        r
+    });
+
+    let cx = (preview.left + preview.right) / 2;
+    let cy = (preview.top + preview.bottom) / 2;
+    let (iw, ih) = (ui.s(56.0), ui.s(34.0));
+    placement_icon(ui, rect(cx - iw / 2, cy - ih / 2, iw, ih), b);
+
+    let title = picker_label(b.action);
+    match monitor_text(b) {
+        Some(m) => {
+            let mid = name.top + row_h / 2;
+            ui.text(
+                RECT {
+                    bottom: mid,
+                    ..name
+                },
+                title,
+                g.bold,
+                TEXT,
+                DT_LEFT,
+            );
+            ui.text(RECT { top: mid, ..name }, m, g.normal, WEAK, DT_LEFT);
+        }
+        None => ui.text(name, title, g.bold, TEXT, DT_LEFT),
+    }
+
+    let text = if recording {
+        "Press keys…  (Esc to cancel)"
+    } else if b.shortcut.is_empty() {
+        "Click to set"
+    } else {
+        &b.shortcut
+    };
+    let fh = ui.s(28.0);
+    let field = rect(
+        shortcut_col.left,
+        y + (row_h - fh) / 2,
+        shortcut_col.right - shortcut_col.left,
+        fh,
+    );
+    let style = if recording {
+        Style::Selected
+    } else {
+        Style::Normal
+    };
+    ui.button(
+        field,
+        text,
+        Hit::Shortcut(i),
+        Some(HELP_SHORTCUT),
+        style,
+        true,
+    );
+
+    let arrow = rect(
+        arrow_col.left,
+        y + (row_h - fh) / 2,
+        arrow_col.right - arrow_col.left,
+        fh,
+    );
+    ui.item(arrow, Hit::Toggle(i), None);
+    let color = if row_hover || ui.hovered(arrow) {
+        TEXT
+    } else {
+        WEAK
+    };
+    ui.chevron(
+        (arrow.left + arrow.right) / 2,
+        (arrow.top + arrow.bottom) / 2,
+        expanded,
+        color,
+    );
+    y += row_h + ui.s(2.0);
+
+    let tw = w - 2 * pad;
+    if recording && !app.record_hint.is_empty() {
+        y += ui.wrap(pad, y, tw, &app.record_hint, g.normal, WARNING) + ui.s(2.0);
+    }
+    if let Some(p) = app.blocking_problem(i) {
+        y += ui.wrap(pad, y, tw, &p, g.normal, ERROR) + ui.s(2.0);
+    } else if let Some(wn) = app.warning(i) {
+        y += ui.wrap(pad, y, tw, &wn, g.normal, WARNING) + ui.s(2.0);
+    }
+
+    if expanded {
+        y = settings_body(ui, b, i, y + ui.s(4.0));
+    }
+    y += ui.s(6.0);
+    ui.line(pad, y, w - pad, y, BORDER);
+    y + ui.s(6.0)
+}
+
+/// The expanded settings of row `i`. Returns the y below them.
+fn settings_body(ui: &mut Ui, b: &Binding, i: usize, mut y: i32) -> i32 {
+    let x = ui.s(PAD + 20.0);
+    let line_h = ui.s(36.0);
+    let ch = ui.s(28.0);
+    let cx = x + ui.s(LABEL_W);
+    let label = |ui: &mut Ui, y: i32, text: &str, tip: &'static str| {
+        let w = ui.measure(text, ui.g.normal);
+        let r = rect(x, y, w, line_h);
+        ui.text(r, text, ui.g.normal, TEXT, DT_LEFT);
+        ui.item(r, Hit::None, Some(tip));
+    };
+
+    label(ui, y, "Action:", action_help(b.action));
+    ui.button(
+        rect(cx, y + (line_h - ch) / 2, ui.s(290.0), ch),
+        picker_label(b.action),
+        Hit::Picker(i),
+        None,
+        Style::Picker,
+        true,
+    );
+    y += line_h;
+
+    let mut choice_row =
+        |ui: &mut Ui, text: &str, tip: &'static str, opts: [(Pick, &str, bool); 2]| {
+            label(ui, y, text, tip);
+            choice(ui, i, cx, y + (line_h - ch) / 2, ch, opts);
+            y += line_h;
+        };
+    let a = b.action;
+    if is_full(a) || is_half(a) {
+        let m = monitor_of(a);
+        choice_row(
+            ui,
+            "Monitor:",
+            HELP_MONITOR,
+            [
+                (
+                    Pick::Monitor(MonitorRole::Primary),
+                    "Primary monitor",
+                    m == MonitorRole::Primary,
+                ),
+                (
+                    Pick::Monitor(MonitorRole::Secondary),
+                    "Secondary monitor",
+                    m == MonitorRole::Secondary,
+                ),
+            ],
+        );
+        if is_half(a) {
+            let left = side_is_left(a);
+            choice_row(
+                ui,
+                "Side:",
+                HELP_SIDE,
+                [
+                    (Pick::Left(true), "Left half", left),
+                    (Pick::Left(false), "Right half", !left),
+                ],
+            );
+        }
+    }
+    if a.is_pair() {
+        let p = b.pair_settings();
+        let monitors = [
+            (
+                Pick::PairMonitor(MonitorRole::Primary),
+                "Primary monitor",
+                p.monitor == MonitorRole::Primary,
+            ),
+            (
+                Pick::PairMonitor(MonitorRole::Secondary),
+                "Secondary monitor",
+                p.monitor == MonitorRole::Secondary,
+            ),
+        ];
+        if matches!(a.layout(), Layout::Split { .. }) {
+            choice_row(
+                ui,
+                "Current window on:",
+                HELP_ORDER,
+                [
+                    (
+                        Pick::Order(Order::CurrentLeft),
+                        "Left",
+                        p.order == Order::CurrentLeft,
+                    ),
+                    (
+                        Pick::Order(Order::CurrentRight),
+                        "Right",
+                        p.order == Order::CurrentRight,
+                    ),
+                ],
+            );
+            choice_row(ui, "Monitor:", HELP_TILE_ON, monitors);
+        } else {
+            choice_row(ui, "Current window on:", HELP_GOES_TO, monitors);
+        }
+        choice_row(
+            ui,
+            "Final focus:",
+            HELP_FOCUS,
+            [
+                (
+                    Pick::Focus(Focus::Current),
+                    "Current window",
+                    p.focus == Focus::Current,
+                ),
+                (
+                    Pick::Focus(Focus::Previous),
+                    "Previous window",
+                    p.focus == Focus::Previous,
+                ),
+            ],
+        );
+    }
+
+    ui.button_auto(
+        x,
+        y + ui.s(4.0),
+        "Remove",
+        Hit::Remove(i),
+        None,
+        Style::Normal,
+        true,
+    );
+    y + ui.s(4.0) + ui.s(30.0) + ui.s(4.0)
+}
+
+/// Two-option segmented control. The chosen option gets a neutral fill.
+fn choice(ui: &mut Ui, i: usize, x: i32, y: i32, h: i32, opts: [(Pick, &str, bool); 2]) {
+    let inner = ui.s(2.0);
+    let widths = opts.map(|(_, label, _)| ui.measure(label, ui.g.normal) + ui.s(20.0));
+    let total = widths[0] + widths[1] + inner * 3;
+    ui.frame(rect(x, y, total, h), BORDER, ui.s(4.0));
+    let mut bx = x + inner;
+    for ((pick, label, chosen), bw) in opts.into_iter().zip(widths) {
+        let r = rect(bx, y + inner, bw, h - 2 * inner);
+        if chosen {
+            ui.fill(r, CHOSEN, ui.s(3.0));
+        } else if ui.hovered(r) {
+            ui.fill(r, HOVER, ui.s(3.0));
+        }
+        ui.text(r, label, ui.g.normal, TEXT, DT_CENTER);
+        ui.item(r, Hit::Pick(i, pick), None);
+        bx += bw + inner;
+    }
+}
+
+// Action drop-down command ids.
+const MENU_FULL: usize = 1;
+const MENU_HALF: usize = 2;
+const MENU_NEXT: usize = 3;
+const MENU_TWO: usize = 10;
+
+thread_local! {
+    // Already const; the lint misfires on this form.
+    #[allow(clippy::missing_const_for_thread_local)]
+    static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` on the app state. Returns None if there is no state or it is already in use,
+/// which happens only if a nested message loop re-enters a handler.
+fn with<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    APP.with(|cell| {
+        let mut guard = cell.try_borrow_mut().ok()?;
+        guard.as_mut().map(f)
+    })
+}
+
+/// Re-lays out both panes: places the list, sets its scroll bar and tooltips, and repaints.
+/// Call after any state change. Never call it while `with` is running.
+fn refresh() {
+    let Some((wins, list_rect, show_list, content_h, scroll, tools, old_tools)) = with(|a| {
+        if a.wins.list.0.is_null() {
+            return None;
+        }
+        let (w, h) = a.client(Pane::Main);
+        let (main_items, header_h) = a.layout(Pane::Main, a.gfx.dc, false, w, h);
+        let show_list = a.load_error.is_none();
+        let list_h = (h - header_h - a.gfx.s(FOOTER_H)).max(0);
+        let list_w = w - unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, a.gfx.dpi) };
+        let (list_items, content_h) = a.layout(Pane::List, a.gfx.dc, false, list_w, list_h);
+        a.scroll = a.scroll.clamp(0, (content_h - list_h).max(0));
+        let tips = |items: &[Item], dy: i32| -> Vec<(RECT, &'static str)> {
+            items
+                .iter()
+                .filter_map(|it| {
+                    let mut r = it.rect;
+                    r.top -= dy;
+                    r.bottom -= dy;
+                    it.tip.map(|t| (r, t))
+                })
+                .collect()
+        };
+        let tools = [tips(&main_items, 0), tips(&list_items, a.scroll)];
+        let old = a.tools;
+        a.tools = [tools[0].len(), tools[1].len()];
+        Some((
+            a.wins,
+            rect(0, header_h, w, list_h),
+            show_list,
+            content_h,
+            a.scroll,
+            tools,
+            old,
+        ))
+    })
+    .flatten() else {
+        return;
+    };
+    unsafe {
+        let r = list_rect;
+        let _ = MoveWindow(
+            wins.list,
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+            true,
+        );
+        let _ = ShowWindow(wins.list, if show_list { SW_SHOW } else { SW_HIDE });
+        let si = SCROLLINFO {
+            cbSize: size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_ALL | SIF_DISABLENOSCROLL,
+            nMin: 0,
+            nMax: (content_h - 1).max(0),
+            nPage: (r.bottom - r.top).max(0) as u32,
+            nPos: scroll,
+            nTrackPos: 0,
+        };
+        SetScrollInfo(wins.list, SB_VERT, &si, true);
+        set_tools(wins.tip, wins.main, old_tools[0], &tools[0]);
+        set_tools(wins.tip, wins.list, old_tools[1], &tools[1]);
+        let _ = InvalidateRect(Some(wins.main), None, false);
+        let _ = InvalidateRect(Some(wins.list), None, false);
+    }
+}
+
+/// Replaces the tooltip tools of `target`: one per item with help text.
+fn set_tools(tip: HWND, target: HWND, old: usize, tools: &[(RECT, &'static str)]) {
+    let info = |id: usize, r: RECT, text: &mut Vec<u16>| TTTOOLINFOW {
+        cbSize: size_of::<TTTOOLINFOW>() as u32,
+        uFlags: TTF_SUBCLASS,
+        hwnd: target,
+        uId: id,
+        rect: r,
+        lpszText: PWSTR(text.as_mut_ptr()),
         ..Default::default()
     };
-    eframe::run_native(
-        "pane-pogo settings",
-        options,
-        Box::new(|_cc| Ok(Box::new(App::new()))),
-    )
+    unsafe {
+        for id in 0..old {
+            let ti = info(id, RECT::default(), &mut vec![0]);
+            SendMessageW(
+                tip,
+                TTM_DELTOOLW,
+                None,
+                Some(LPARAM(&ti as *const _ as isize)),
+            );
+        }
+        for (id, (r, text)) in tools.iter().enumerate() {
+            let mut buf = wide(text);
+            let ti = info(id, *r, &mut buf);
+            SendMessageW(
+                tip,
+                TTM_ADDTOOLW,
+                None,
+                Some(LPARAM(&ti as *const _ as isize)),
+            );
+        }
+    }
+}
+
+/// Opens the action drop-down under the picker of row `i` and applies the choice.
+fn pick_action(i: usize, r: RECT) {
+    let Some((wins, current)) = with(|a| (a.wins, a.bindings[i].action)) else {
+        return;
+    };
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            return;
+        };
+        let add = |flags, id: usize, text: &str| {
+            let flags = if id != 0 && menu_id(current) == id {
+                flags | MF_CHECKED
+            } else {
+                flags
+            };
+            let _ = AppendMenuW(menu, flags, id, PCWSTR(wide(text).as_ptr()));
+        };
+        add(MF_STRING | MF_GRAYED, 0, "One window");
+        add(MF_STRING, MENU_FULL, "Full screen on one monitor");
+        add(MF_STRING, MENU_HALF, "Half of one monitor");
+        add(
+            MF_STRING,
+            MENU_NEXT,
+            action_label(Action::MoveToNextMonitor),
+        );
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        add(MF_STRING | MF_GRAYED, 0, "Two windows");
+        for (n, a) in TWO_WINDOW_ACTIONS.iter().enumerate() {
+            add(MF_STRING, MENU_TWO + n, action_label(*a));
+        }
+        let mut pt = POINT {
+            x: r.left,
+            y: r.bottom,
+        };
+        let _ = ClientToScreen(wins.list, &mut pt);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
+            pt.x,
+            pt.y,
+            Some(0),
+            wins.main,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+        if cmd.0 > 0 {
+            with(|a| a.set_action(i, cmd.0 as usize));
+        }
+    }
+}
+
+/// Drop-down command that matches an action, for the check mark.
+fn menu_id(a: Action) -> usize {
+    if is_full(a) {
+        MENU_FULL
+    } else if is_half(a) {
+        MENU_HALF
+    } else if a == Action::MoveToNextMonitor {
+        MENU_NEXT
+    } else {
+        TWO_WINDOW_ACTIONS
+            .iter()
+            .position(|t| *t == a)
+            .map_or(0, |n| MENU_TWO + n)
+    }
+}
+
+fn point(lparam: LPARAM) -> POINT {
+    POINT {
+        x: (lparam.0 & 0xFFFF) as i16 as i32,
+        y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+    }
+}
+
+fn on_click(pane: Pane, pt: POINT) {
+    let Some(Some((_, hit, r))) = with(|a| a.item_at(pane, pt)) else {
+        return;
+    };
+    match hit {
+        Hit::None => return,
+        Hit::Picker(i) => pick_action(i, r),
+        _ => {
+            with(|a| a.apply(hit));
+        }
+    }
+    refresh();
+}
+
+fn on_mouse_move(pane: Pane, hwnd: HWND, pt: POINT) {
+    unsafe {
+        let mut tme = TRACKMOUSEEVENT {
+            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        let _ = TrackMouseEvent(&mut tme);
+    }
+    let changed = with(|a| {
+        a.mouse[pane as usize] = Some(pt);
+        let idx = a.item_at(pane, pt).map(|(n, ..)| n);
+        let changed = a.hover[pane as usize] != idx;
+        a.hover[pane as usize] = idx;
+        changed
+    });
+    if changed == Some(true) {
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+}
+
+fn on_mouse_leave(pane: Pane, hwnd: HWND) {
+    with(|a| {
+        a.mouse[pane as usize] = None;
+        a.hover[pane as usize] = None;
+    });
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+fn scroll_by(dy: i32) {
+    with(|a| a.scroll += dy);
+    refresh();
+}
+
+fn on_wheel(wparam: WPARAM) {
+    let delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as i32;
+    let step = with(|a| a.gfx.s(ROW_H)).unwrap_or(40);
+    scroll_by(-delta * step * 3 / 2 / 120);
+}
+
+/// Double-buffered paint of one pane.
+fn paint(pane: Pane, hwnd: HWND) {
+    unsafe {
+        let mut ps = PAINTSTRUCT::default();
+        let hdc = BeginPaint(hwnd, &mut ps);
+        let mut cr = RECT::default();
+        let _ = GetClientRect(hwnd, &mut cr);
+        let (w, h) = (cr.right, cr.bottom);
+        let mem = CreateCompatibleDC(Some(hdc));
+        let bmp = CreateCompatibleBitmap(hdc, w.max(1), h.max(1));
+        let old_bmp = SelectObject(mem, bmp.into());
+        let old_pen = SelectObject(mem, GetStockObject(DC_PEN));
+        let old_brush = SelectObject(mem, GetStockObject(DC_BRUSH));
+        SetBkMode(mem, TRANSPARENT);
+        SetDCBrushColor(mem, BG);
+        SetDCPenColor(mem, BG);
+        let _ = RoundRect(mem, -1, -1, w + 1, h + 1, 0, 0);
+        with(|a| {
+            if pane == Pane::List {
+                let _ = SetViewportOrgEx(mem, 0, -a.scroll, None);
+            }
+            a.layout(pane, mem, true, w, h);
+            let _ = SetViewportOrgEx(mem, 0, 0, None);
+        });
+        let _ = BitBlt(hdc, 0, 0, w, h, Some(mem), 0, 0, SRCCOPY);
+        SelectObject(mem, old_brush);
+        SelectObject(mem, old_pen);
+        SelectObject(mem, old_bmp);
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteDC(mem);
+        let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+/// Asks before closing with unsaved changes. Returns true if the window may close.
+fn confirm_close(hwnd: HWND) -> bool {
+    let Some((dirty, blocking, allow)) = with(|a| (a.dirty(), a.any_blocking(), a.allow_close))
+    else {
+        return false;
+    };
+    if !dirty || allow {
+        return true;
+    }
+    with(|a| a.prompting = true);
+    let title = w!("Pane Pogo shortcuts");
+    let close = unsafe {
+        if blocking {
+            let text = wide(
+                "You have unsaved changes, but some rows need fixing before they can be saved.\n\nClose without saving?",
+            );
+            MessageBoxW(
+                Some(hwnd),
+                PCWSTR(text.as_ptr()),
+                title,
+                MB_OKCANCEL | MB_ICONWARNING,
+            ) == IDOK
+        } else {
+            let text = wide("You have unsaved changes. Save them before closing?");
+            match MessageBoxW(
+                Some(hwnd),
+                PCWSTR(text.as_ptr()),
+                title,
+                MB_YESNOCANCEL | MB_ICONWARNING,
+            ) {
+                IDYES => with(|a| {
+                    a.save();
+                    !a.dirty()
+                })
+                .unwrap_or(false),
+                IDNO => true,
+                _ => false,
+            }
+        }
+    };
+    with(|a| {
+        a.prompting = false;
+        a.allow_close = close;
+    });
+    if !close {
+        refresh();
+    }
+    close
+}
+
+/// Close when the tray app exits. Settings is its own process, so it only learns this by
+/// polling. Only a tray app seen running counts, so a standalone Settings window stays open.
+fn on_tray_timer(hwnd: HWND) {
+    let Some((close, changed)) = with(|a| {
+        let running = app_running();
+        let changed = running != a.tray_running;
+        a.tray_running = running;
+        let close = if running {
+            a.tray_seen = true;
+            false
+        } else if a.tray_seen && !a.prompting {
+            a.tray_seen = false;
+            true
+        } else {
+            false
+        };
+        (close, changed)
+    }) else {
+        return;
+    };
+    if changed {
+        refresh();
+    }
+    if close {
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+unsafe extern "system" fn main_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_PAINT => paint(Pane::Main, hwnd),
+        WM_ERASEBKGND => return LRESULT(1),
+        WM_SIZE => refresh(),
+        WM_GETMINMAXINFO => {
+            let dpi = with(|a| a.gfx.dpi).unwrap_or(96) as i32;
+            let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+            info.ptMinTrackSize = POINT {
+                x: 716 * dpi / 96,
+                y: 440 * dpi / 96,
+            };
+        }
+        WM_DPICHANGED => {
+            let dpi = (wparam.0 & 0xFFFF) as u32;
+            with(|a| a.gfx = Gfx::new(dpi));
+            let r = unsafe { *(lparam.0 as *const RECT) };
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            refresh();
+        }
+        WM_MOUSEMOVE => on_mouse_move(Pane::Main, hwnd, point(lparam)),
+        WM_MOUSELEAVE => on_mouse_leave(Pane::Main, hwnd),
+        WM_LBUTTONDOWN => on_click(Pane::Main, point(lparam)),
+        WM_MOUSEWHEEL => on_wheel(wparam),
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            if with(|a| a.record_key(wparam.0 as u32, lparam)) == Some(true) {
+                refresh();
+                return LRESULT(0);
+            }
+        }
+        // Swallow the character a recorded Alt+key produces, which would otherwise beep.
+        // Alt+Space still opens the window menu.
+        WM_SYSCHAR if wparam.0 != 0x20 => return LRESULT(0),
+        WM_CHAR if with(|a| a.recording.is_some()) == Some(true) => return LRESULT(0),
+        WM_ACTIVATE if wparam.0 & 0xFFFF == 0 => {
+            with(|a| a.stop_recording());
+            refresh();
+        }
+        WM_TIMER if wparam.0 == TIMER_TRAY => on_tray_timer(hwnd),
+        WM_TIMER if wparam.0 == TIMER_STATUS => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), TIMER_STATUS);
+            }
+            with(|a| a.status = config::load_status());
+            refresh();
+        }
+        WM_CLOSE => {
+            if confirm_close(hwnd) {
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                }
+            }
+            return LRESULT(0);
+        }
+        WM_DESTROY => {
+            with(|a| a.stop_recording());
+            unsafe { PostQuitMessage(0) };
+        }
+        _ => {}
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+unsafe extern "system" fn list_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_PAINT => paint(Pane::List, hwnd),
+        WM_ERASEBKGND => return LRESULT(1),
+        WM_MOUSEMOVE => on_mouse_move(Pane::List, hwnd, point(lparam)),
+        WM_MOUSELEAVE => on_mouse_leave(Pane::List, hwnd),
+        WM_LBUTTONDOWN => on_click(Pane::List, point(lparam)),
+        WM_MOUSEWHEEL => {
+            on_wheel(wparam);
+            return LRESULT(0);
+        }
+        WM_VSCROLL => {
+            let page = with(|a| a.client(Pane::List).1).unwrap_or(0);
+            let line = with(|a| a.gfx.s(ROW_H)).unwrap_or(40);
+            let code = (wparam.0 & 0xFFFF) as i32;
+            match code {
+                c if c == SB_LINEUP.0 => scroll_by(-line),
+                c if c == SB_LINEDOWN.0 => scroll_by(line),
+                c if c == SB_PAGEUP.0 => scroll_by(-page),
+                c if c == SB_PAGEDOWN.0 => scroll_by(page),
+                c if c == SB_TOP.0 => scroll_by(i32::MIN / 2),
+                c if c == SB_BOTTOM.0 => scroll_by(i32::MAX / 2),
+                c if c == SB_THUMBTRACK.0 => {
+                    let mut si = SCROLLINFO {
+                        cbSize: size_of::<SCROLLINFO>() as u32,
+                        fMask: SIF_TRACKPOS,
+                        ..Default::default()
+                    };
+                    if unsafe { GetScrollInfo(hwnd, SB_VERT, &mut si) }.is_ok() {
+                        with(|a| a.scroll = si.nTrackPos);
+                        refresh();
+                    }
+                }
+                _ => {}
+            }
+            return LRESULT(0);
+        }
+        _ => {}
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+pub fn run() -> Result<(), String> {
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let icc = INITCOMMONCONTROLSEX {
+            dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_BAR_CLASSES,
+        };
+        let _ = InitCommonControlsEx(&icc);
+    }
+    let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| e.to_string())?;
+    let dpi = unsafe { GetDpiForSystem() };
+    let icon = |cx, cy| unsafe {
+        LoadImageW(
+            Some(hinstance.into()),
+            PCWSTR(APP_ICON_ID as *const u16),
+            IMAGE_ICON,
+            GetSystemMetricsForDpi(cx, dpi),
+            GetSystemMetricsForDpi(cy, dpi),
+            LR_DEFAULTCOLOR,
+        )
+        .map(|h| HICON(h.0))
+        .unwrap_or_default()
+    };
+    let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default();
+    let main_class = w!("PanePogoSettings");
+    let list_class = w!("PanePogoSettingsList");
+    unsafe {
+        RegisterClassExW(&WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(main_proc),
+            hInstance: hinstance.into(),
+            hIcon: icon(SM_CXICON, SM_CYICON),
+            hIconSm: icon(SM_CXSMICON, SM_CYSMICON),
+            hCursor: cursor,
+            lpszClassName: main_class,
+            ..Default::default()
+        });
+        RegisterClassExW(&WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(list_proc),
+            hInstance: hinstance.into(),
+            hCursor: cursor,
+            lpszClassName: list_class,
+            ..Default::default()
+        });
+    }
+
+    APP.with(|cell| *cell.borrow_mut() = Some(App::new(Gfx::new(dpi))));
+
+    let style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+    let mut outer = rect(0, 0, 860 * dpi as i32 / 96, 600 * dpi as i32 / 96);
+    unsafe {
+        let _ = AdjustWindowRectExForDpi(&mut outer, style, false, WINDOW_EX_STYLE(0), dpi);
+    }
+    let main = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            main_class,
+            w!("Pane Pogo shortcuts"),
+            style,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            outer.right - outer.left,
+            outer.bottom - outer.top,
+            None,
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    let list = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            list_class,
+            PCWSTR::null(),
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL,
+            0,
+            0,
+            0,
+            0,
+            Some(main),
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    let tip = unsafe {
+        CreateWindowExW(
+            WS_EX_TOPMOST,
+            w!("tooltips_class32"),
+            PCWSTR::null(),
+            WS_POPUP,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            Some(main),
+            None,
+            Some(hinstance.into()),
+            None,
+        )
+    }
+    .unwrap_or_default();
+
+    let window_dpi = unsafe { GetDpiForWindow(main) };
+    with(|a| {
+        a.wins = Wins { main, list, tip };
+        if window_dpi != 0 && window_dpi != a.gfx.dpi {
+            a.gfx = Gfx::new(window_dpi);
+        }
+        unsafe {
+            SendMessageW(
+                tip,
+                TTM_SETMAXTIPWIDTH,
+                None,
+                Some(LPARAM(a.gfx.s(360.0) as isize)),
+            );
+            SetTimer(Some(main), TIMER_TRAY, 1000, None);
+        }
+    });
+    refresh();
+    unsafe {
+        let _ = ShowWindow(main, SW_SHOW);
+    }
+
+    let mut msg = MSG::default();
+    while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    // Dropping the state resumes the tray app's hotkeys if a recording was still open.
+    APP.with(|cell| cell.borrow_mut().take());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1028,34 +2253,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recorded_shortcut_falls_back_to_physical_key() {
-        let alt_shift = egui::Modifiers {
-            alt: true,
-            shift: true,
-            ..Default::default()
-        };
-        // Shift+1 on a US layout: egui names the key `!`.
+    fn recorded_shortcut_names_keys() {
+        // Shift+1: the virtual key is `1` on any layout, never `!`.
         assert_eq!(
-            recorded_shortcut(alt_shift, egui::Key::Exclamationmark, Some(egui::Key::Num1)),
-            Ok("Alt+Shift+1".to_string())
+            recorded_shortcut(false, true, true, u32::from(b'1')),
+            Some("Alt+Shift+1".to_string())
         );
-        // A letter keeps the layout's name, even if the physical key differs (AZERTY A/Q).
         assert_eq!(
-            recorded_shortcut(alt_shift, egui::Key::A, Some(egui::Key::Q)),
-            Ok("Alt+Shift+A".to_string())
+            recorded_shortcut(true, false, false, 0x74),
+            Some("Ctrl+F5".to_string())
         );
-        // Neither key usable: report the named key.
-        assert_eq!(
-            recorded_shortcut(alt_shift, egui::Key::Questionmark, Some(egui::Key::Slash)),
-            Err("Questionmark")
-        );
+        // A key the tray app cannot register (VK_OEM_2, `/?` on US layouts).
+        assert_eq!(recorded_shortcut(false, true, true, 0xBF), None);
     }
 
-    /// Lays out seven rows through `shortcut_row` at the minimum window width, with an
-    /// expanded body, an error line and a recording row between them, and checks that every
-    /// shortcut field and arrow lands on the same x.
-    #[test]
-    fn row_columns_align() {
+    fn sample_app() -> App {
         let actions = [
             Action::TileLeft,
             Action::TileDualMonitors,
@@ -1065,128 +2277,136 @@ mod tests {
             Action::SwapWindows,
             Action::TileRightSecondary,
         ];
-        let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(700.0, 600.0),
-            )),
-            ..Default::default()
-        };
-        let mut fields = Vec::new();
-        let mut arrows = Vec::new();
-        let mut output = ctx.run_ui(input, |ui| {
-            fields.clear();
-            arrows.clear();
-            for (n, a) in actions.iter().enumerate() {
-                let b = Binding {
-                    shortcut: if n == 3 {
-                        String::new()
-                    } else {
-                        format!("Ctrl+Alt+{n}")
-                    },
-                    action: *a,
-                    pair: None,
-                };
-                let out = shortcut_row(ui, &b, n == 1, n == 5);
-                fields.push(out.shortcut.rect);
-                arrows.push(out.arrow.rect);
-                if n == 1 {
-                    ui.indent(("body", n), |ui| {
-                        ui.label("Monitor:");
-                        ui.label("Expanded settings for this row.");
-                    });
-                }
-                if n == 3 {
-                    ui.label("Click the shortcut box and press the keys you want.");
-                }
-            }
-        });
+        let bindings = actions
+            .iter()
+            .enumerate()
+            .map(|(n, a)| Binding {
+                shortcut: if n == 3 {
+                    String::new()
+                } else {
+                    format!("Ctrl+Alt+{n}")
+                },
+                action: *a,
+                pair: None,
+            })
+            .collect();
+        let mut app = App::with_bindings(bindings, Gfx::new(96));
+        app.expanded = Some(1);
+        app.recording = Some(5);
+        app
+    }
 
-        // No renderer here, so drop the font texture upload deliberately.
-        output.textures_delta.clear();
+    /// Clears the recording before drop, so dropping does not message a running tray app.
+    fn finish(mut app: App) {
+        app.recording = None;
+    }
 
+    /// Lays out seven rows at the minimum window width, with an expanded body, an error line
+    /// and a recording row between them, and checks that every shortcut field and arrow lands
+    /// on the same x.
+    #[test]
+    fn row_columns_align() {
+        let app = sample_app();
+        let (items, height) = app.layout(Pane::List, app.gfx.dc, false, 700, 400);
+        let fields: Vec<RECT> = items
+            .iter()
+            .filter(|it| matches!(it.hit, Hit::Shortcut(_)))
+            .map(|it| it.rect)
+            .collect();
+        // Each row pushes two Toggle items: the whole row, then the arrow.
+        let arrows: Vec<RECT> = items
+            .iter()
+            .filter(|it| matches!(it.hit, Hit::Toggle(_)))
+            .skip(1)
+            .step_by(2)
+            .map(|it| it.rect)
+            .collect();
         assert_eq!(fields.len(), 7);
+        assert_eq!(arrows.len(), 7);
         for (n, (f, a)) in fields.iter().zip(&arrows).enumerate() {
-            assert_eq!(f.min.x, fields[0].min.x, "shortcut x, row {n}");
-            assert_eq!(f.width(), COL_SHORTCUT, "shortcut width, row {n}");
-            assert_eq!(a.min.x, arrows[0].min.x, "arrow x, row {n}");
+            assert_eq!(f.left, fields[0].left, "shortcut x, row {n}");
+            assert_eq!(
+                f.right - f.left,
+                COL_SHORTCUT as i32,
+                "shortcut width, row {n}"
+            );
+            assert_eq!(a.left, arrows[0].left, "arrow x, row {n}");
         }
         // Rows stack top to bottom and stay inside the minimum window width.
-        assert!(fields.windows(2).all(|w| w[1].min.y > w[0].max.y));
-        assert!(arrows[0].max.x <= 700.0);
+        assert!(fields.windows(2).all(|w| w[1].top > w[0].bottom));
+        assert!(arrows[0].right <= 700);
+        assert!(height > fields[6].bottom);
+        // The expanded row shows its settings.
+        assert!(items.iter().any(|it| it.hit == Hit::Picker(1)));
+        assert!(items.iter().any(|it| it.hit == Hit::Remove(1)));
+        finish(app);
     }
 
-    /// Clicks at a point on one row over three frames (move, press, release) and returns
-    /// which of row / shortcut / arrow reported the click.
-    fn click_at(point: impl Fn(&RowOutput) -> egui::Pos2) -> (bool, bool, bool) {
-        let ctx = egui::Context::default();
-        let b = Binding {
-            shortcut: "Ctrl+Alt+T".into(),
-            action: Action::TileWindows,
-            pair: None,
-        };
-        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(700.0, 600.0));
-        let target = std::cell::Cell::new(egui::Pos2::ZERO);
-        let result = std::cell::Cell::new((false, false, false));
-        let frame = |events: Vec<egui::Event>, find: bool| {
-            let input = egui::RawInput {
-                screen_rect: Some(screen),
-                events,
-                ..Default::default()
-            };
-            let mut out = ctx.run_ui(input, |ui| {
-                // Same container as the app: rows live inside a vertical scroll area.
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let o = shortcut_row(ui, &b, false, false);
-                        if find {
-                            target.set(point(&o));
-                        }
-                        result.set((o.row.clicked(), o.shortcut.clicked(), o.arrow.clicked()));
-                    });
-            });
-            out.textures_delta.clear();
-        };
-        frame(vec![], true);
-        let pos = target.get();
-        frame(vec![egui::Event::PointerMoved(pos)], false);
-        let button = |pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::default(),
-        };
-        frame(vec![button(true)], false);
-        frame(vec![button(false)], false);
-        result.get()
-    }
-
-    /// `run` unwraps this decode, so a broken PNG must fail here rather than at startup.
-    #[test]
-    fn window_icon_decodes() {
-        let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-64.png"))
-            .expect("assets/icon-64.png decodes");
-        assert_eq!((icon.width, icon.height), (64, 64));
+    fn hit_at(app: &App, p: POINT) -> Hit {
+        let (items, _) = app.layout(Pane::List, app.gfx.dc, false, 700, 400);
+        items
+            .iter()
+            .rev()
+            .find(|it| contains(it.rect, p))
+            .map_or(Hit::None, |it| it.hit)
     }
 
     #[test]
     fn row_click_targets() {
-        // Name column: toggles the row only.
-        let name = click_at(|o| {
-            egui::pos2(
-                o.row.rect.min.x + COL_PREVIEW + COL_GAP + 20.0,
-                o.row.rect.center().y,
-            )
-        });
-        assert_eq!(name, (true, false, false), "click on name");
+        let app = sample_app();
+        let (items, _) = app.layout(Pane::List, app.gfx.dc, false, 700, 400);
+        let row = items[0].rect;
+        let field = items
+            .iter()
+            .find(|it| it.hit == Hit::Shortcut(0))
+            .unwrap()
+            .rect;
+        let arrow = items
+            .iter()
+            .filter(|it| it.hit == Hit::Toggle(0))
+            .nth(1)
+            .unwrap()
+            .rect;
+        let mid = |r: RECT| POINT {
+            x: (r.left + r.right) / 2,
+            y: (r.top + r.bottom) / 2,
+        };
+        // Name column: toggles the row.
+        let name = POINT {
+            x: row.left + (COL_PREVIEW + COL_GAP + 20.0) as i32,
+            y: mid(row).y,
+        };
+        assert_eq!(hit_at(&app, name), Hit::Toggle(0), "click on name");
         // Shortcut field: records only.
-        let field = click_at(|o| o.shortcut.rect.center());
-        assert!(field.1, "click on shortcut");
-        assert!(!field.0 && !field.2, "shortcut click must not toggle");
+        assert_eq!(
+            hit_at(&app, mid(field)),
+            Hit::Shortcut(0),
+            "click on shortcut"
+        );
         // Chevron: toggles.
-        let arrow = click_at(|o| o.arrow.rect.center());
-        assert!(arrow.0 || arrow.2, "click on chevron");
+        assert_eq!(hit_at(&app, mid(arrow)), Hit::Toggle(0), "click on chevron");
+        finish(app);
+    }
+
+    #[test]
+    fn menu_round_trips_actions() {
+        let mut app = App::with_bindings(
+            vec![Binding {
+                shortcut: "Alt+Shift+W".into(),
+                action: Action::TileRightSecondary,
+                pair: None,
+            }],
+            Gfx::new(96),
+        );
+        // Picking the kind already chosen keeps the monitor and side.
+        app.set_action(0, menu_id(Action::TileRightSecondary));
+        assert_eq!(app.bindings[0].action, Action::TileRightSecondary);
+        app.set_action(0, menu_id(Action::Tile1to2));
+        assert_eq!(app.bindings[0].action, Action::Tile1to2);
+        app.pick(0, Pick::Focus(Focus::Current));
+        assert!(app.bindings[0].pair.is_some());
+        app.set_action(0, MENU_FULL);
+        assert_eq!(app.bindings[0].action, Action::FullPrimary);
+        assert_eq!(app.bindings[0].pair, None);
     }
 }

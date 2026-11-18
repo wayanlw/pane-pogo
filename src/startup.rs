@@ -72,7 +72,7 @@ fn install_copy() -> Result<PathBuf, String> {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     fs::copy(&exe, &target).map_err(|e| {
-        format!("could not copy to {} ({e}). If another pane-pogo is running from there, exit it first.", target.display())
+        format!("could not copy to {} ({e}). If another Pane Pogo is running from there, exit it first.", target.display())
     })?;
     Ok(target)
 }

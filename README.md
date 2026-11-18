@@ -66,7 +66,7 @@ Look elsewhere if:
 Right-click the tray icon and choose **Settings...**
 
 <p align="center">
-  <img src="docs/images/settings.png" width="700" alt="The pane-pogo shortcuts window. Each row shows a small layout preview, the action, its monitor, and the shortcut.">
+  <img src="docs/images/settings.png" width="700" alt="The Pane Pogo shortcuts window. Each row shows a small layout preview, the action, its monitor, and the shortcut.">
 </p>
 
 1. Click **Add shortcut**.

@@ -35,7 +35,7 @@ fn main() {
         Ok(h) => h,
         Err(e) => {
             applog::write(&format!("Tray icon: {e}"));
-            error_box(&format!("pane-pogo could not start its tray icon.\n\n{e}"));
+            error_box(&format!("Pane Pogo could not start its tray icon.\n\n{e}"));
             std::process::exit(1);
         }
     };
@@ -130,7 +130,7 @@ fn load_or_report(tray_hwnd: windows::Win32::Foundation::HWND) -> Option<config:
             applog::write(&format!("Config error: {e}"));
             tray::notify(
                 tray_hwnd,
-                "pane-pogo: shortcuts file has an error",
+                "Pane Pogo: shortcuts file has an error",
                 "Your shortcuts are not active. Open Settings from the tray icon to fix it.",
                 true,
             );
@@ -146,7 +146,7 @@ fn warn_taken_defaults(tray_hwnd: windows::Win32::Foundation::HWND) {
     if let Some(text) = taken_message(&taken) {
         tray::notify(
             tray_hwnd,
-            "pane-pogo: some shortcuts are not active",
+            "Pane Pogo: some shortcuts are not active",
             &text,
             false,
         );
@@ -165,7 +165,7 @@ fn taken_message(taken: &[String]) -> Option<String> {
 
 fn error_box(text: &str) {
     let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    let title: Vec<u16> = "pane-pogo"
+    let title: Vec<u16> = "Pane Pogo"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();

@@ -25,7 +25,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 const CMD_STARTUP: usize = 1;
 const CMD_EXIT: usize = 2;
 const CMD_SETTINGS: usize = 3;
-const TOOLTIP: &str = "pane-pogo";
+const TOOLTIP: &str = "Pane Pogo";
 
 /// Id of the "TaskbarCreated" message, registered at startup.
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -74,7 +74,7 @@ pub fn create() -> Result<HWND, String> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(class.as_ptr()),
-            PCWSTR(wide("pane-pogo").as_ptr()),
+            PCWSTR(wide("Pane Pogo").as_ptr()),
             WS_OVERLAPPED,
             0,
             0,
@@ -213,7 +213,7 @@ fn toggle_startup(hwnd: HWND) {
             notify(
                 hwnd,
                 "Starts with Windows",
-                &format!("pane-pogo will start from {}", path.display()),
+                &format!("Pane Pogo will start from {}", path.display()),
                 false,
             );
         }

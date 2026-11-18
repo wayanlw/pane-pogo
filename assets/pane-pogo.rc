@@ -1,3 +1,6 @@
 // App icon. Id 1 is the first icon, so Explorer uses it for the exe.
 // The tray loads it by the same id (src/tray.rs, APP_ICON_ID).
 1 ICON "icon.ico"
+
+// Manifest (type 24, RT_MANIFEST): Common Controls 6 for message boxes and tooltips.
+1 24 "pane-pogo.manifest"
